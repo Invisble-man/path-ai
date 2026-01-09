@@ -8,7 +8,7 @@ import docx
 st.set_page_config(page_title="Path – Federal Proposal Generator", layout="wide")
 
 # =========================
-# Helpers
+# Text extraction
 # =========================
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
@@ -16,57 +16,187 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
     text = ""
     for page in reader.pages:
         text += page.extract_text() or ""
+        text += "\n"
     return text
 
 def extract_text_from_docx(file_bytes: bytes) -> str:
     document = docx.Document(io.BytesIO(file_bytes))
     return "\n".join(p.text for p in document.paragraphs)
 
-def find_attachments(text: str):
-    """
-    Simple attachment/form detector (starter version).
-    We will improve this later.
-    """
-    keywords = [
-        "attachment", "attachments",
-        "appendix", "appendices",
-        "exhibit", "exhibits",
-        "annex", "enclosure",
-        "sf-1449", "sf 1449",
-        "sf-33", "sf 33",
-        "sf-30", "sf 30",
-        "sf-18", "sf 18",
-        "dd-1155", "dd 1155",
-        "reps and certs", "representations and certifications",
-        "price schedule", "pricing", "cost proposal",
-        "signature", "signed",
-        "fill out", "complete and return",
-        "amendment", "amendments"
-    ]
-
-    results = []
-    for line in text.splitlines():
-        clean = line.strip()
-        if not clean:
-            continue
-        low = clean.lower()
-        if any(k in low for k in keywords):
-            # avoid super long lines
-            results.append(clean[:300])
-    # de-dup while keeping order
-    seen = set()
-    deduped = []
-    for r in results:
-        if r not in seen:
-            seen.add(r)
-            deduped.append(r)
-    return deduped
-
 def safe_len(s: str) -> int:
     return len(s) if s else 0
 
 # =========================
-# App State (saved per user browser session)
+# RFP intelligence (starter but smarter)
+# =========================
+
+FORM_PATTERNS = [
+    (r"\bSF[-\s]?1449\b", "SF 1449 (Solicitation/Contract/Order for Commercial Items)"),
+    (r"\bSF[-\s]?33\b", "SF 33 (Solicitation/Offer and Award)"),
+    (r"\bSF[-\s]?30\b", "SF 30 (Amendment of Solicitation/Modification of Contract)"),
+    (r"\bSF[-\s]?18\b", "SF 18 (Request for Quotations)"),
+    (r"\bDD[-\s]?1155\b", "DD 1155 (Order for Supplies or Services)"),
+    (r"\bSF[-\s]?26\b", "SF 26 (Award/Contract)"),
+    (r"\bSF[-\s]?34\b", "SF 34 (Annual Bid Bond)"),
+    (r"\bSF[-\s]?28\b", "SF 28 (Affidavit of Individual Surety)"),
+]
+
+ATTACHMENT_PATTERNS = [
+    (r"\battachment\s+[a-z0-9]+\b", "Attachment"),
+    (r"\bappendix\s+[a-z0-9]+\b", "Appendix"),
+    (r"\bexhibit\s+[a-z0-9]+\b", "Exhibit"),
+    (r"\benclosure\s+[a-z0-9]+\b", "Enclosure"),
+    (r"\bannex\s+[a-z0-9]+\b", "Annex"),
+    (r"\btab\s+[a-z0-9]+\b", "Tab"),
+]
+
+SUBMISSION_PATTERNS = [
+    (r"\bpage limit\b|\bpages maximum\b|\bnot exceed\s+\d+\s+pages\b", "Page Limit"),
+    (r"\bfont\b|\b12[-\s]?point\b|\b11[-\s]?point\b|\bTimes New Roman\b|\bArial\b", "Font Requirement"),
+    (r"\bmargins?\b|\b1 inch\b|\bone inch\b", "Margin Requirement"),
+    (r"\bdue\b|\bdue date\b|\bno later than\b|\bdeadline\b", "Due Date/Deadline"),
+    (r"\bsubmit\b|\bsubmission\b|\be-?mail\b|\bportal\b|\bSam\.gov\b|\beBuy\b|\bPIEE\b", "Submission Method"),
+    (r"\bsection\s+l\b|\bsection\s+m\b", "Sections L/M referenced"),
+]
+
+AMENDMENT_PATTERN = r"\bamendment\b|\bamendments\b|\ba0{2,}\d+\b|\bmodification\b"
+
+SEPARATE_SUBMIT_HINTS = [
+    r"\bsigned\b",
+    r"\bsignature\b",
+    r"\bcomplete and return\b",
+    r"\bfill(?:ed)? out\b",
+    r"\bsubmit separately\b",
+    r"\bseparate file\b",
+    r"\binclude as an attachment\b",
+    r"\bexcel\b|\bspreadsheet\b",
+]
+
+def normalize_line(line: str) -> str:
+    line = re.sub(r"\s+", " ", line).strip()
+    return line
+
+def unique_keep_order(items):
+    seen = set()
+    out = []
+    for x in items:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+def scan_lines(text: str, max_lines=5000):
+    lines = []
+    for raw in text.splitlines():
+        s = normalize_line(raw)
+        if s:
+            lines.append(s)
+        if len(lines) >= max_lines:
+            break
+    return lines
+
+def detect_forms_and_attachments(text: str):
+    lines = scan_lines(text)
+
+    forms_found = []
+    attachments_found = []
+    amendment_hits = []
+    separate_submit_hits = []
+
+    # Look for form IDs and attachment-ish references
+    for line in lines:
+        low = line.lower()
+
+        # Forms
+        for pat, label in FORM_PATTERNS:
+            if re.search(pat, line, re.IGNORECASE):
+                forms_found.append(label)
+
+        # Attachments/appendices/exhibits
+        for pat, label in ATTACHMENT_PATTERNS:
+            if re.search(pat, line, re.IGNORECASE):
+                attachments_found.append(line)
+
+        # Amendments
+        if re.search(AMENDMENT_PATTERN, line, re.IGNORECASE):
+            amendment_hits.append(line)
+
+        # "Submit separately" hints
+        if any(re.search(h, low, re.IGNORECASE) for h in SEPARATE_SUBMIT_HINTS):
+            # Only keep the lines that also mention a likely artifact/form/attachment
+            if ("sf " in low or "sf-" in low or "attachment" in low or "appendix" in low or "exhibit" in low
+                or "amendment" in low or "pricing" in low or "price" in low or "spreadsheet" in low):
+                separate_submit_hits.append(line)
+
+    forms_found = unique_keep_order(forms_found)
+    attachments_found = unique_keep_order(attachments_found)
+    amendment_hits = unique_keep_order(amendment_hits)
+    separate_submit_hits = unique_keep_order(separate_submit_hits)
+
+    return {
+        "forms": forms_found,
+        "attachments_lines": attachments_found,
+        "amendment_lines": amendment_hits,
+        "separate_submit_lines": separate_submit_hits
+    }
+
+def detect_submission_rules(text: str):
+    lines = scan_lines(text)
+    found = []
+
+    for line in lines:
+        for pat, label in SUBMISSION_PATTERNS:
+            if re.search(pat, line, re.IGNORECASE):
+                # keep the specific line for context
+                found.append((label, line))
+
+    # group by label
+    grouped = {}
+    for label, line in found:
+        grouped.setdefault(label, [])
+        grouped[label].append(line)
+
+    # dedupe each group
+    for k in list(grouped.keys()):
+        grouped[k] = unique_keep_order(grouped[k])[:10]
+
+    return grouped
+
+def generate_compliance_warnings(rfp_text: str, intel: dict, rules: dict):
+    warnings = []
+
+    if not rfp_text.strip():
+        warnings.append("No RFP text saved yet. Go to 'RFP Intake' and click Analyze.")
+        return warnings
+
+    # If amendments are mentioned, warn to acknowledge all amendments
+    if intel["amendment_lines"]:
+        warnings.append("Amendments are referenced. Make sure you acknowledge/sign all amendments and include them in your submission package.")
+
+    # If forms found, warn about signatures/completions
+    if intel["forms"]:
+        warnings.append("Standard forms were detected (SF/DD forms). Many require signatures or specific blocks completed—confirm each one.")
+
+    # If page/font/margins show up, warn to follow formatting
+    if any(k in rules for k in ["Page Limit", "Font Requirement", "Margin Requirement"]):
+        warnings.append("Formatting rules detected (page limit/font/margins). If you violate these, you can be eliminated as non-compliant.")
+
+    # If submission method shows up, warn to follow method exactly
+    if "Submission Method" in rules:
+        warnings.append("Submission instructions detected (email/portal). Follow the method exactly, including file naming and deadline time zone.")
+
+    # If we see “submit separately” lines, warn to separate forms/price files
+    if intel["separate_submit_lines"]:
+        warnings.append("Some items appear to require separate completion/submission (signed forms, spreadsheets, separate files). Review the checklist below.")
+
+    # If nothing detected at all, warn that RFP may be incomplete/poorly pasted
+    if (not intel["forms"] and not intel["attachments_lines"] and not intel["amendment_lines"] and not rules):
+        warnings.append("No obvious compliance markers detected. The RFP text may be incomplete (try uploading the PDF instead of copying sections).")
+
+    return warnings
+
+# =========================
+# Session state
 # =========================
 
 if "company" not in st.session_state:
@@ -79,29 +209,34 @@ if "company" not in st.session_state:
         "poc_name": "",
         "poc_email": "",
         "poc_phone": "",
-        "certifications": [],   # list of strings
+        "certifications": [],
         "naics": "",
         "capabilities": "",
-        "past_performance": "", # simple text for now
+        "past_performance": "",
     }
 
 if "rfp_text" not in st.session_state:
     st.session_state.rfp_text = ""
 
+if "rfp_intel" not in st.session_state:
+    st.session_state.rfp_intel = None
+
+if "rfp_rules" not in st.session_state:
+    st.session_state.rfp_rules = None
+
 # =========================
-# Sidebar Navigation
+# Navigation
 # =========================
 
 st.sidebar.title("Path")
-page = st.sidebar.radio("Go to", ["1) RFP Intake", "2) Company Info", "3) Proposal Output"])
-
+page = st.sidebar.radio("Go to", ["RFP Intake", "Company Info", "Proposal Output"])
 st.sidebar.caption("Tip: Build this in small steps. You're doing great.")
 
 # =========================
-# Page 1: RFP Intake
+# Page: RFP Intake
 # =========================
 
-if page == "1) RFP Intake":
+if page == "RFP Intake":
     st.title("1) RFP Intake")
 
     uploaded_file = st.file_uploader("Upload RFP (PDF, DOCX, or TXT)", type=["pdf", "docx", "txt"])
@@ -109,27 +244,31 @@ if page == "1) RFP Intake":
     rfp_text = st.session_state.rfp_text
 
     if uploaded_file:
-        if uploaded_file.name.lower().endswith(".pdf"):
-            rfp_text = extract_text_from_pdf(uploaded_file.read())
-        elif uploaded_file.name.lower().endswith(".docx"):
-            rfp_text = extract_text_from_docx(uploaded_file.read())
+        name = uploaded_file.name.lower()
+        data = uploaded_file.read()
+        if name.endswith(".pdf"):
+            rfp_text = extract_text_from_pdf(data)
+        elif name.endswith(".docx"):
+            rfp_text = extract_text_from_docx(data)
         else:
-            rfp_text = uploaded_file.read().decode("utf-8", errors="ignore")
+            rfp_text = data.decode("utf-8", errors="ignore")
 
     rfp_text = st.text_area("Or paste RFP / RFI text", value=rfp_text, height=320)
 
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        analyze = st.button("Analyze")
-    with col2:
-        st.write("")
-
-    if analyze:
+    if st.button("Analyze"):
         if not rfp_text.strip():
             st.warning("Please upload or paste an RFP first.")
         else:
             st.session_state.rfp_text = rfp_text
-            st.success("Saved. Go to '3) Proposal Output' to see results.")
+
+            # NEW: create intelligence on analyze
+            intel = detect_forms_and_attachments(rfp_text)
+            rules = detect_submission_rules(rfp_text)
+
+            st.session_state.rfp_intel = intel
+            st.session_state.rfp_rules = rules
+
+            st.success("Analysis saved. Go to 'Proposal Output' to see the checklist + warnings.")
 
     st.markdown("---")
     st.subheader("Quick Stats (preview)")
@@ -138,10 +277,10 @@ if page == "1) RFP Intake":
     st.code((rfp_text[:300] if rfp_text else ""), language="text")
 
 # =========================
-# Page 2: Company Info
+# Page: Company Info
 # =========================
 
-elif page == "2) Company Info":
+elif page == "Company Info":
     st.title("2) Company Info")
     st.caption("Fill this out once. We will reuse it for every proposal.")
 
@@ -168,17 +307,12 @@ elif page == "2) Company Info":
     c["certifications"] = selected
 
     st.markdown("### Capabilities Statement (short)")
-    c["capabilities"] = st.text_area(
-        "One paragraph describing what you do (we'll improve formatting later)",
-        value=c["capabilities"],
-        height=140
-    )
+    c["capabilities"] = st.text_area("One paragraph describing what you do", value=c["capabilities"], height=140)
 
     st.markdown("### Past Performance (starter)")
-    st.caption("If you have none, just write what you *have done* (commercial work, internal projects, subcontract work).")
+    st.caption("If you have none, write what you HAVE done (commercial work, internal projects, subcontract work).")
     c["past_performance"] = st.text_area("Paste past performance notes", value=c["past_performance"], height=160)
 
-    # Save to session_state
     st.session_state.company = c
 
     st.markdown("---")
@@ -201,14 +335,14 @@ elif page == "2) Company Info":
                 loaded = json.loads(uploaded_profile.read().decode("utf-8"))
                 if isinstance(loaded, dict):
                     st.session_state.company.update(loaded)
-                    st.success("Loaded company profile. You're good.")
+                    st.success("Loaded company profile.")
                 else:
                     st.error("That JSON file doesn't look like a company profile.")
             except Exception as e:
                 st.error(f"Could not load JSON: {e}")
 
 # =========================
-# Page 3: Proposal Output
+# Page: Proposal Output
 # =========================
 
 else:
@@ -218,23 +352,73 @@ else:
     c = st.session_state.company
 
     if not rfp_text.strip():
-        st.warning("No RFP saved yet. Go to '1) RFP Intake' and click Analyze.")
+        st.warning("No RFP saved yet. Go to 'RFP Intake' and click Analyze.")
         st.stop()
 
-    st.subheader("A) Attachment / Form Checklist (starter)")
-    attachments = find_attachments(rfp_text)
+    # If user pasted RFP but never clicked Analyze, compute intel on the fly
+    intel = st.session_state.rfp_intel or detect_forms_and_attachments(rfp_text)
+    rules = st.session_state.rfp_rules or detect_submission_rules(rfp_text)
 
-    if attachments:
-        st.write("These lines look like they reference attachments/forms/amendments:")
-        for a in attachments[:40]:
-            st.write("•", a)
-        if len(attachments) > 40:
-            st.caption(f"Showing 40 of {len(attachments)} matches.")
+    # NEW SECTION: Submission rules found
+    st.subheader("A) Submission Rules Found (starter)")
+    if rules:
+        for label, lines in rules.items():
+            with st.expander(label, expanded=False):
+                for ln in lines:
+                    st.write("•", ln)
     else:
-        st.write("No obvious attachment references detected yet (we’ll improve this).")
+        st.write("No obvious submission rules detected yet (uploading the PDF usually works better than copy/paste).")
 
     st.markdown("---")
-    st.subheader("B) Company Profile Snapshot")
+
+    # NEW SECTION: Forms & Attachments
+    st.subheader("B) Forms & Attachments Detected (starter)")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**Forms (SF/DD) Found**")
+        if intel["forms"]:
+            for f in intel["forms"]:
+                st.write("•", f)
+        else:
+            st.write("No SF/DD forms detected.")
+
+    with col2:
+        st.markdown("**Amendments / Mods referenced**")
+        if intel["amendment_lines"]:
+            for a in intel["amendment_lines"][:15]:
+                st.write("•", a)
+            if len(intel["amendment_lines"]) > 15:
+                st.caption(f"Showing 15 of {len(intel['amendment_lines'])}")
+        else:
+            st.write("No amendments detected.")
+
+    st.markdown("**Attachment / Appendix / Exhibit lines**")
+    if intel["attachments_lines"]:
+        for a in intel["attachments_lines"][:25]:
+            st.write("•", a)
+        if len(intel["attachments_lines"]) > 25:
+            st.caption(f"Showing 25 of {len(intel['attachments_lines'])}")
+    else:
+        st.write("No obvious attachment references detected.")
+
+    st.markdown("---")
+
+    # NEW SECTION: Compliance warnings
+    st.subheader("C) Compliance Warnings (action items)")
+    warnings = generate_compliance_warnings(rfp_text, intel, rules)
+    for w in warnings:
+        st.warning(w)
+
+    if intel["separate_submit_lines"]:
+        st.markdown("### Items that look like they must be completed/submitted separately")
+        for ln in intel["separate_submit_lines"][:25]:
+            st.write("•", ln)
+        if len(intel["separate_submit_lines"]) > 25:
+            st.caption(f"Showing 25 of {len(intel['separate_submit_lines'])}")
+
+    st.markdown("---")
+    st.subheader("D) Company Profile Snapshot")
     st.write("**Legal Name:**", c.get("legal_name") or "—")
     st.write("**UEI:**", c.get("uei") or "—")
     st.write("**POC:**", c.get("poc_name") or "—", "|", c.get("poc_email") or "—", "|", c.get("poc_phone") or "—")
@@ -243,9 +427,7 @@ else:
     st.info(c.get("capabilities") or "—")
 
     st.markdown("---")
-    st.subheader("C) Draft Skeleton (starter)")
-    st.caption("This is a starter proposal outline. Next we’ll make it match Section L/M and generate better content.")
-
+    st.subheader("E) Draft Skeleton (starter)")
     outline = f"""
 1. Cover Letter
    - Company: {c.get("legal_name") or "[Company Name]"}
@@ -266,12 +448,13 @@ else:
    - {c.get("past_performance")[:500] + ("..." if safe_len(c.get("past_performance")) > 500 else "") if c.get("past_performance") else "[Add past performance or narrative]"}
 
 6. Compliance Checklist
-   - Attachments/Forms: {len(attachments)} potential references detected.
    - Confirm all amendments acknowledged.
-   - Confirm submission format (PDF, page limits, font, margins, etc).
+   - Confirm all required forms are signed/filled.
+   - Confirm formatting rules (page limit / font / margins).
+   - Confirm submission method and deadline.
 """
     st.code(outline, language="text")
 
     st.markdown("---")
-    st.subheader("D) RFP Preview (first 1,500 chars)")
+    st.subheader("F) RFP Preview (first 1,500 chars)")
     st.code(rfp_text[:1500], language="text")
