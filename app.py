@@ -19,7 +19,7 @@ from docx.oxml.ns import qn
 # =========================
 st.set_page_config(page_title="Path – Federal Proposal Generator", layout="wide")
 
-BUILD_VERSION = "v0.11.0"
+BUILD_VERSION = "v0.12.0"
 BUILD_DATE = "Jan 9, 2026"
 
 # =========================
@@ -96,6 +96,9 @@ def inject_css():
 
         /* Tighten expanders */
         div[data-testid="stExpander"] details summary p { font-size: 0.95rem; }
+
+        /* Slightly larger primary headers */
+        h1, h2, h3 { letter-spacing: -0.2px; }
         </style>
         """,
         unsafe_allow_html=True
@@ -120,6 +123,26 @@ def ui_notice(title: str, body: str, tone: str = "neutral"):
         """,
         unsafe_allow_html=True
     )
+
+# =========================
+# Label cleaning (TurboTax-like UI)
+# =========================
+def label_clean(title: str) -> str:
+    """
+    Cleans UI labels:
+    - Removes leading "A) ", "D) ", "1) ", "3) ", etc.
+    - Removes suffixes like "(starter)" and "(Detected)"
+    """
+    t = (title or "").strip()
+    # leading enumerations
+    t = re.sub(r"^\s*[A-Za-z]\)\s+", "", t)         # D) Something
+    t = re.sub(r"^\s*\d+\)\s+", "", t)              # 3) Something
+    t = re.sub(r"^\s*\d+\.\s+", "", t)              # 3. Something
+    # trailing noise
+    t = re.sub(r"\s*\(starter\)\s*$", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s*\(detected(?:-only)?\)\s*$", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s*\(detected\)\s*$", "", t, flags=re.IGNORECASE)
+    return t.strip()
 
 # =========================
 # Helpers
@@ -151,10 +174,6 @@ def _contains_any(text: str, keywords: List[str]) -> bool:
     low = (text or "").lower()
     return any(k in low for k in keywords)
 
-def label_clean(title: str) -> str:
-    """Remove noisy suffixes like '(starter)' from UI labels."""
-    return re.sub(r"\s*\(starter\)\s*$", "", title or "").strip()
-
 # =========================
 # Extraction (PDF/DOCX/TXT)
 # =========================
@@ -180,7 +199,6 @@ def extract_text_from_pdf(file_bytes: bytes) -> Tuple[str, Dict[str, Any]]:
     out = "\n".join(parts).strip()
     diag["chars_extracted"] = len(out)
 
-    # Heuristic for scanned
     ratio = 0.0
     if diag["pages_total"] > 0:
         ratio = diag["pages_with_text"] / max(1, diag["pages_total"])
@@ -317,7 +335,6 @@ def detect_submission_rules(text: str) -> Dict[str, List[str]]:
         grouped[k] = unique_keep_order(grouped[k])[:12]
     return grouped
 
-# --- Due date refinement to reduce garbage matches ---
 DATE_PATTERNS = [
     r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2},\s+\d{4}\b",
     r"\b\d{1,2}/\d{1,2}/\d{2,4}\b",
@@ -348,7 +365,6 @@ def refine_due_date_rule(text: str, rules: Dict[str, List[str]]) -> Dict[str, Li
         if not any(k in low for k in DUE_KEYWORDS) and "due" not in low:
             continue
 
-        # avoid invoice/payment due lines
         if "invoice" in low or "invoices" in low or "payment" in low:
             continue
 
@@ -536,10 +552,6 @@ def missing_info_alerts(company: CompanyInfo) -> Tuple[List[str], List[str]]:
 # Draft Generator (CLEAN signature)
 # =========================
 def _signature_block(company: CompanyInfo) -> str:
-    """
-    IMPORTANT: No 'wet ink' / 'DocuSign' / signature instruction text.
-    Leaves implied signature space.
-    """
     signer_name = (company.signer_name.strip() or company.poc_name.strip())
     signer_title = company.signer_title.strip()
     signer_company = (company.signer_company.strip() or company.legal_name.strip())
@@ -729,7 +741,7 @@ def build_checklist_items(
     return uniq
 
 # =========================
-# Compliance Matrix v2 (best-effort)
+# Compliance Matrix (best-effort)
 # =========================
 REQ_TRIGGER = re.compile(r"\b(shall|must|will)\b", re.IGNORECASE)
 REQ_NUMBERED = re.compile(r"^(\(?[a-z0-9]{1,4}\)?[\.\)]|\d{1,3}\.)\s+", re.IGNORECASE)
@@ -811,6 +823,7 @@ def auto_map_section(req_text: str) -> str:
 
 # =========================
 # Submission Package Checklist (Detected-only)
+# (UI labels are cleaned at render time)
 # =========================
 def build_submission_package_detected(
     rfp_text: str,
@@ -828,7 +841,6 @@ def build_submission_package_detected(
     has_attachments = bool(attachments)
     has_separate = bool(separate)
 
-    # Technical evidence
     tech_evidence = False
     if drafts and any(k in drafts for k in ["Executive Summary", "Technical Approach", "Management Plan"]):
         tech_evidence = True
@@ -850,9 +862,8 @@ def build_submission_package_detected(
         if "Font Requirement" in rules or "Margin Requirement" in rules:
             items.append("Verify font/margin formatting requirements")
 
-        pkg["Volume I – Technical (Detected)"] = unique_keep_order(items)
+        pkg["Volume I – Technical"] = unique_keep_order(items)
 
-    # Past performance evidence
     pp_evidence = False
     if drafts.get("Past Performance"):
         if company.past_performance.strip():
@@ -868,9 +879,8 @@ def build_submission_package_detected(
             items.append("If required: attach CPARS or performance evaluations")
         if _contains_any(rfp_text, ["reference", "references"]):
             items.append("If required: include references/contact information")
-        pkg["Volume II – Past Performance (Detected)"] = unique_keep_order(items)
+        pkg["Volume II – Past Performance"] = unique_keep_order(items)
 
-    # Price evidence
     price_evidence = False
     if has_attachments and any(_contains_any(a, PRICE_HINTS) for a in attachments):
         price_evidence = True
@@ -888,16 +898,16 @@ def build_submission_package_detected(
                     items.append(f"Attachment mention: {a}")
         if "File Format Rules" in rules:
             items.append("Verify required pricing file format (Excel/PDF) and naming rules")
-        pkg["Volume III – Price/Cost (Detected)"] = unique_keep_order(items)
+        pkg["Volume III – Price/Cost"] = unique_keep_order(items)
 
     if has_forms:
-        pkg["Required Forms (Detected)"] = unique_keep_order([f"Complete/attach: {f}" for f in forms])
+        pkg["Required Forms"] = unique_keep_order([f"Complete/attach: {f}" for f in forms])
 
     if has_attachments:
-        pkg["Attachments / Exhibits (Detected)"] = unique_keep_order(attachments[:20])
+        pkg["Attachments / Exhibits"] = unique_keep_order(attachments[:20])
 
     if has_separate:
-        pkg["Separate Submission Indicators (Detected)"] = unique_keep_order(separate[:25])
+        pkg["Separate Submission Items"] = unique_keep_order(separate[:25])
 
     instr = []
     if rules.get("Due Date/Deadline"):
@@ -907,7 +917,7 @@ def build_submission_package_detected(
     if rules.get("File Format Rules"):
         instr.append("File format rules detected — confirm each required format")
     if instr:
-        pkg["Submission Instructions (Detected)"] = unique_keep_order(instr)
+        pkg["Submission Instructions"] = unique_keep_order(instr)
 
     return pkg
 
@@ -989,7 +999,6 @@ def add_page_numbers(doc: docx.Document):
     add_field(p, "NUMPAGES")
 
 def set_word_styles_no_blue_links(doc: docx.Document):
-    """Forces Hyperlink style to look like normal text (black, not underlined)."""
     try:
         hl = doc.styles["Hyperlink"]
         hl.font.color.rgb = RGBColor(0, 0, 0)
@@ -1000,7 +1009,6 @@ def set_word_styles_no_blue_links(doc: docx.Document):
 def add_table_of_contents(doc: docx.Document):
     doc.add_page_break()
     doc.add_heading("Table of Contents", level=1)
-    # Removed \h so TOC entries are NOT hyperlinks
     p = doc.add_paragraph()
     add_field(p, r'TOC \o "1-3" \z \u')
     doc.add_page_break()
@@ -1072,7 +1080,6 @@ def build_proposal_docx_bytes(
     add_title_page(doc, company, logo_bytes)
     add_table_of_contents(doc)
 
-    # Diagnostics
     doc.add_heading("Diagnostics Summary", level=1)
     if rfp_diag:
         doc.add_paragraph(f"File Type: {rfp_diag.get('file_type','—')}")
@@ -1086,7 +1093,6 @@ def build_proposal_docx_bytes(
         doc.add_paragraph("No file diagnostics available (text may have been pasted).")
     doc.add_page_break()
 
-    # Gate
     doc.add_heading("Pre-Submission Gate Result", level=1)
     if validation_result:
         doc.add_paragraph(f"Status: {validation_result.get('status','—')}")
@@ -1102,18 +1108,16 @@ def build_proposal_docx_bytes(
         doc.add_paragraph("Gate has not been run yet.")
     doc.add_page_break()
 
-    # Submission package
-    doc.add_heading("Submission Package Checklist (Detected)", level=1)
+    doc.add_heading("Submission Package Checklist", level=1)
     if submission_pkg:
         for bucket, items in submission_pkg.items():
-            doc.add_paragraph(bucket, style="List Bullet")
+            doc.add_paragraph(label_clean(bucket), style="List Bullet")
             for it in items:
                 doc.add_paragraph(f"☐ {it}", style="List Bullet 2")
     else:
         doc.add_paragraph("No submission package items detected yet.")
     doc.add_page_break()
 
-    # Company profile
     doc.add_heading("Company Profile", level=1)
     certs = ", ".join(company.certifications or []) if company.certifications else "—"
     profile = f"""Company: {company.legal_name or "—"}
@@ -1126,13 +1130,11 @@ Website: {company.website or "—"}
 """
     add_paragraph_lines(doc, profile)
 
-    # Checklist
     doc.add_heading("Compliance Checklist", level=1)
     for it in checklist_items:
         doc.add_paragraph(f"☐ {it['item']}  ({it['status']})", style="List Bullet")
 
-    # Matrix
-    doc.add_heading("Compliance Matrix (Best-Effort)", level=1)
+    doc.add_heading("Compliance Matrix", level=1)
     if matrix_rows:
         table = doc.add_table(rows=1, cols=5)
         hdr = table.rows[0].cells
@@ -1152,11 +1154,10 @@ Website: {company.website or "—"}
     else:
         doc.add_paragraph("No requirements extracted yet.", style="List Bullet")
 
-    # Evidence
     doc.add_heading("Submission Rules (Detected)", level=2)
     if rules:
         for k, lines in rules.items():
-            doc.add_paragraph(k, style="List Bullet")
+            doc.add_paragraph(label_clean(k), style="List Bullet")
             for ln in lines[:6]:
                 doc.add_paragraph(ln, style="List Bullet 2")
     else:
@@ -1183,7 +1184,7 @@ Website: {company.website or "—"}
     else:
         doc.add_paragraph("None detected.", style="List Bullet")
 
-    doc.add_heading("Separate Submission Indicators (Detected)", level=2)
+    doc.add_heading("Separate Submission Items (Detected)", level=2)
     if separate:
         for s in separate[:15]:
             doc.add_paragraph(s, style="List Bullet")
@@ -1197,7 +1198,6 @@ Website: {company.website or "—"}
     else:
         doc.add_paragraph("None.", style="List Bullet")
 
-    # Draft sections
     doc.add_page_break()
     doc.add_heading("Draft Proposal Sections", level=1)
     if drafts:
@@ -1215,7 +1215,6 @@ Website: {company.website or "—"}
 # Diagnostics UI
 # =========================
 def diagnostics_quality(diag: Dict[str, Any]) -> Tuple[str, str]:
-    """Returns (label, level) where level in ['good','warn','bad']."""
     if not diag:
         return ("Extraction quality: Unknown (text pasted)", "warn")
     if diag.get("file_type") != "pdf":
@@ -1394,13 +1393,13 @@ with st.sidebar.expander("Project Save / Load", expanded=False):
             ui_notice("Could not load project", msg, tone="bad")
 
 page = st.sidebar.radio("Go to", ["RFP Intake", "Company Info", "Proposal Output"])
-st.sidebar.caption("Flow: Upload/Paste → Analyze → Matrix → Drafts → Gate → Export")
+st.sidebar.caption("Upload/Paste → Analyze → Matrix → Drafts → Gate → Export")
 
 # =========================
 # Page 1: RFP Intake
 # =========================
 if page == "RFP Intake":
-    st.title("1) RFP Intake")
+    st.title("RFP Intake")
 
     uploaded = st.file_uploader("Upload RFP (PDF, DOCX, or TXT)", type=["pdf", "docx", "txt"])
     pasted = st.text_area("Or paste RFP / RFI text", value=st.session_state.rfp_text, height=320)
@@ -1459,17 +1458,17 @@ if page == "RFP Intake":
             tone="neutral"
         )
 
-    st.markdown("### Diagnostics Preview")
+    st.markdown("### Diagnostics")
     render_diagnostics_card(st.session_state.rfp_diag)
 
-    st.markdown("### Preview (first 1200 characters)")
-    st.text_area("RFP Preview", (st.session_state.rfp_text or "")[:1200], height=220)
+    st.markdown("### Preview")
+    st.text_area("RFP Preview (first 1200 characters)", (st.session_state.rfp_text or "")[:1200], height=220)
 
 # =========================
 # Page 2: Company Info
 # =========================
 elif page == "Company Info":
-    st.title("2) Company Info")
+    st.title("Company Info")
     st.caption("Fill this out once. It auto-fills drafts, export title page, and signature block.")
 
     c: CompanyInfo = st.session_state.company
@@ -1482,13 +1481,13 @@ elif page == "Company Info":
         st.image(st.session_state.logo_bytes, width=180)
 
     st.markdown("---")
-    st.markdown("### Proposal / Contract Information (Title Page)")
+    st.markdown("### Proposal / Contract Info")
     c.proposal_title = st.text_input("Proposal/Contract Title", value=c.proposal_title, placeholder="e.g., Proposal for IT Support Services")
     c.solicitation_number = st.text_input("Solicitation Number", value=c.solicitation_number, placeholder="e.g., W91XXX-26-R-0001")
     c.agency_customer = st.text_input("Agency/Customer", value=c.agency_customer, placeholder="e.g., Department of X / Agency Y")
 
     st.markdown("---")
-    st.markdown("### Company Information")
+    st.markdown("### Company Details")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -1531,36 +1530,11 @@ elif page == "Company Info":
 
     st.session_state.company = c
 
-    st.markdown("---")
-    colA, colB = st.columns(2)
-    with colA:
-        if st.button("Download Company Info (JSON backup)"):
-            backup = json.dumps(c.to_dict(), indent=2)
-            st.download_button("Click to download JSON", data=backup, file_name="company_profile.json", mime="application/json")
-
-    with colB:
-        up = st.file_uploader("Upload Company Info (JSON)", type=["json"])
-        if up:
-            try:
-                loaded = json.loads(up.read().decode("utf-8"))
-                if isinstance(loaded, dict):
-                    for k, v in loaded.items():
-                        if hasattr(c, k):
-                            setattr(c, k, v)
-                    if c.certifications is None:
-                        c.certifications = []
-                    st.session_state.company = c
-                    ui_notice("Company profile loaded", "Fields updated from JSON.", tone="good")
-                else:
-                    ui_notice("Invalid file", "That JSON file isn't a valid company profile.", tone="bad")
-            except Exception as e:
-                ui_notice("Could not load JSON", str(e), tone="bad")
-
 # =========================
-# Page 3: Proposal Output
+# Page 3: Proposal Output (TurboTax-like)
 # =========================
 else:
-    st.title("3) Proposal Output")
+    st.title("Proposal Output")
 
     if not st.session_state.rfp_text.strip():
         ui_notice("No RFP found", "Go to RFP Intake and click Analyze.", tone="warn")
@@ -1601,33 +1575,15 @@ else:
           <span class="pill pill-warn">Unknown: {k["unknown"]}</span>
           <span class="pill {gate_class}">Gate: {gate_label}</span>
           <span class="pill pill-warn">Missing critical fields: {missing_crit_ct}</span>
-          <div class="muted">Goal: Section L/M → Matrix → Gate → Export</div>
+          <div class="muted">Finish these sections top-to-bottom like TurboTax.</div>
         </div>
         """,
         unsafe_allow_html=True
     )
 
-    st.markdown("### Diagnostics")
-    render_diagnostics_card(diag)
-
-    st.markdown("### Missing Info Alerts")
-    if crit:
-        for x in crit:
-            ui_notice("Missing critical field", x, tone="bad")
-    else:
-        ui_notice("Critical fields", "No critical company-info fields missing.", tone="good")
-
-    if rec:
-        with st.expander("Recommended improvements", expanded=False):
-            for x in rec:
-                ui_notice("Recommended improvement", x, tone="warn")
-
-    if required_certs:
-        ui_notice("Detected certification mentions", "RFP references: " + ", ".join(required_certs), tone="neutral")
-
-    st.markdown("---")
-
-    # Submission package (dropdown)
+    # Build these once
+    warns = compliance_warnings(rules, forms, amendments, separate)
+    checklist_items = build_checklist_items(rules, forms, attachments, amendments, separate, required_certs)
     submission_pkg = build_submission_package_detected(
         rfp_text=st.session_state.rfp_text,
         rules=rules,
@@ -1639,8 +1595,26 @@ else:
         company=c
     )
 
-    st.markdown("### Submission Package Checklist")
-    with st.expander("Open Submission Package Checklist", expanded=False):
+    # ---------- TurboTax-style accordion ----------
+    with st.expander("Diagnostics", expanded=False):
+        render_diagnostics_card(diag)
+
+    with st.expander("Missing Info Alerts", expanded=False):
+        if crit:
+            for x in crit:
+                ui_notice("Missing critical field", x, tone="bad")
+        else:
+            ui_notice("Critical fields", "No critical company-info fields missing.", tone="good")
+
+        if rec:
+            ui_notice("Recommended improvements", "These improve competitiveness (not hard blockers).", tone="warn")
+            for x in rec:
+                st.write("•", x)
+
+        if required_certs:
+            ui_notice("Detected certification mentions", "RFP references: " + ", ".join(required_certs), tone="neutral")
+
+    with st.expander("Submission Package Checklist", expanded=True):
         if not submission_pkg:
             ui_notice("Nothing detected yet", "Upload/paste more of Section L/M and re-run Analyze.", tone="warn")
         else:
@@ -1673,12 +1647,7 @@ else:
                 unsafe_allow_html=True
             )
 
-    st.markdown("---")
-
-    # Compliance matrix (dropdown)
-    st.markdown("### Compliance Matrix")
-    st.caption("Open the dropdown to edit the matrix. Keep it short on screen; export captures the full matrix table.")
-    with st.expander("Open Compliance Matrix", expanded=False):
+    with st.expander("Compliance Matrix", expanded=False):
         if not matrix_rows:
             ui_notice("No requirements extracted", "Paste/upload Section L/M and re-run Analyze.", tone="warn")
         else:
@@ -1724,13 +1693,9 @@ else:
 
             st.session_state.matrix_rows = matrix_rows
 
-    st.markdown("---")
+    with st.expander("Validation Lock (Pre-Submit Gate)", expanded=False):
+        deadline_detected = bool(rules.get("Due Date/Deadline"))
 
-    # Gate (dropdown)
-    st.markdown("### Validation Lock (Pre-Submit Gate)")
-    deadline_detected = bool(rules.get("Due Date/Deadline"))
-
-    with st.expander("Open Gate Controls", expanded=False):
         if deadline_detected:
             st.session_state.deadline_ack = st.checkbox(
                 "I acknowledge the detected submission deadline is correct (verify Section L and cover page).",
@@ -1764,63 +1729,50 @@ else:
             else:
                 ui_notice("Status: READY", "Gate passed. You can export once drafts are generated.", tone="good")
 
-    st.markdown("---")
-
-    # Rules / Forms / Attachments / Amendments (all dropdowns)
-    st.markdown("### Submission Requirements & Evidence")
-    with st.expander("Open Submission Rules", expanded=False):
-        if rules:
-            for label, lines in rules.items():
-                with st.expander(label_clean(label), expanded=False):
-                    for ln in lines:
-                        st.write("•", ln)
-        else:
-            st.write("No obvious submission rules detected yet. Upload/paste more of Section L/M.")
-
-    with st.expander("Open Forms / Attachments / Amendments", expanded=False):
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Forms Found**")
-            if forms:
-                for f in forms:
-                    st.write("•", f)
+    with st.expander("Submission Rules / Forms / Attachments / Amendments", expanded=False):
+        with st.expander("Submission Rules", expanded=False):
+            if rules:
+                for label, lines in rules.items():
+                    with st.expander(label_clean(label), expanded=False):
+                        for ln in lines:
+                            st.write("•", ln)
             else:
-                st.write("None detected.")
-        with col2:
-            st.markdown("**Amendments / Mods referenced**")
-            if amendments:
-                for a in amendments[:15]:
+                st.write("No obvious submission rules detected yet. Upload/paste more of Section L/M.")
+
+        with st.expander("Forms / Attachments / Amendments", expanded=False):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**Forms Found**")
+                if forms:
+                    for f in forms:
+                        st.write("•", f)
+                else:
+                    st.write("None detected.")
+            with col2:
+                st.markdown("**Amendments / Mods referenced**")
+                if amendments:
+                    for a in amendments[:15]:
+                        st.write("•", a)
+                else:
+                    st.write("None detected.")
+
+            st.markdown("**Attachments / Exhibits**")
+            if attachments:
+                for a in attachments[:25]:
                     st.write("•", a)
             else:
                 st.write("None detected.")
 
-        st.markdown("**Attachments / Exhibits**")
-        if attachments:
-            for a in attachments[:25]:
-                st.write("•", a)
-        else:
-            st.write("None detected.")
+            if separate:
+                st.markdown("**Separate submission indicators**")
+                for ln in separate[:25]:
+                    st.write("•", ln)
 
-        if separate:
-            st.markdown("**Separate submission indicators**")
-            for ln in separate[:25]:
-                st.write("•", ln)
-
-    st.markdown("---")
-
-    # Warnings (dropdown)
-    warns = compliance_warnings(rules, forms, amendments, separate)
-    st.markdown("### Warnings")
-    with st.expander("Open Warnings", expanded=False):
+    with st.expander("Warnings", expanded=False):
         for w in warns:
             ui_notice("Warning", w, tone="warn")
 
-    st.markdown("---")
-
-    # Checklist (dropdown)
-    checklist_items = build_checklist_items(rules, forms, attachments, amendments, separate, required_certs)
-    st.markdown("### Compliance Checklist")
-    with st.expander("Open Checklist", expanded=False):
+    with st.expander("Compliance Checklist", expanded=False):
         for idx, it in enumerate(checklist_items):
             key = f"chk_{idx}_{it['source']}"
             if key not in st.session_state.checklist_done:
@@ -1828,14 +1780,10 @@ else:
             label = f"{it['item']}  —  [{it['status']}]  ({it['source']})"
             st.session_state.checklist_done[key] = st.checkbox(label, value=st.session_state.checklist_done[key], key=key)
 
-    st.markdown("---")
+    with st.expander("Draft Proposal Sections", expanded=False):
+        kws = st.session_state.keywords or []
+        st.caption("Tailoring keywords (auto-extracted): " + (", ".join(kws[:10]) if kws else "None detected yet"))
 
-    # Draft generator (dropdown)
-    st.markdown("### Draft Proposal Sections")
-    kws = st.session_state.keywords or []
-    st.caption("Tailoring keywords (auto-extracted): " + (", ".join(kws[:10]) if kws else "None detected yet"))
-
-    with st.expander("Open Draft Generator", expanded=False):
         if st.button("Generate Draft Sections", use_container_width=True):
             st.session_state.drafts = generate_drafts(
                 sow_snips=st.session_state.sow_snips or [],
@@ -1855,50 +1803,45 @@ else:
         else:
             ui_notice("Drafts not generated", "Generate drafts to enable export.", tone="neutral")
 
-    st.markdown("---")
+    with st.expander("Export (Word Proposal Package)", expanded=True):
+        vr = st.session_state.validation_last
+        export_blocked = False
+        block_reason = ""
 
-    # Export
-    st.markdown("### Export (Word Proposal Package)")
-    vr = st.session_state.validation_last
-    export_blocked = False
-    block_reason = ""
+        if vr and vr.get("level") == "blocked":
+            export_blocked = True
+            block_reason = "Export is disabled because the Pre-Submission Gate is NOT COMPLIANT."
+        elif not (st.session_state.drafts or {}):
+            export_blocked = True
+            block_reason = "Export is disabled until you generate draft sections."
 
-    if vr and vr.get("level") == "blocked":
-        export_blocked = True
-        block_reason = "Export is disabled because the Pre-Submission Gate is NOT COMPLIANT."
-    elif not (st.session_state.drafts or {}):
-        export_blocked = True
-        block_reason = "Export is disabled until you generate draft sections."
+        if export_blocked:
+            ui_notice("Export locked", block_reason, tone="bad")
+            st.caption("Fix the issues above, run the Gate again, then Export will unlock.")
+        else:
+            doc_bytes = build_proposal_docx_bytes(
+                company=c,
+                logo_bytes=logo_bytes,
+                rfp_diag=diag,
+                rules=rules,
+                forms=forms,
+                attachments=attachments,
+                amendments=amendments,
+                separate=separate,
+                warnings=warns,
+                checklist_items=checklist_items,
+                matrix_rows=st.session_state.matrix_rows or [],
+                drafts=st.session_state.drafts or {},
+                validation_result=vr,
+                submission_pkg=submission_pkg,
+            )
+            st.download_button(
+                label="Download Proposal Package (.docx)",
+                data=doc_bytes,
+                file_name="proposal_package.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+            st.caption("In Word: right-click the Table of Contents → Update Field → Update entire table.")
 
-    if export_blocked:
-        ui_notice("Export locked", block_reason, tone="bad")
-        st.caption("Fix the issues above, run the Gate again, then Export will unlock.")
-    else:
-        doc_bytes = build_proposal_docx_bytes(
-            company=c,
-            logo_bytes=logo_bytes,
-            rfp_diag=diag,
-            rules=rules,
-            forms=forms,
-            attachments=attachments,
-            amendments=amendments,
-            separate=separate,
-            warnings=warns,
-            checklist_items=checklist_items,
-            matrix_rows=st.session_state.matrix_rows or [],
-            drafts=st.session_state.drafts or {},
-            validation_result=vr,
-            submission_pkg=submission_pkg,
-        )
-        st.download_button(
-            label="Download Proposal Package (.docx)",
-            data=doc_bytes,
-            file_name="proposal_package.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-        )
-        st.caption("In Word: right-click the Table of Contents → Update Field → Update entire table.")
-
-    st.markdown("---")
-    st.markdown("### RFP Preview")
-    with st.expander("Open RFP Preview", expanded=False):
+    with st.expander("RFP Preview", expanded=False):
         st.text_area("RFP Preview (first 1500 characters)", st.session_state.rfp_text[:1500], height=220)
