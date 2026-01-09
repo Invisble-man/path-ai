@@ -2,6 +2,7 @@ import io
 import json
 import re
 import base64
+import csv
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Tuple, Optional, Any
 
@@ -11,14 +12,15 @@ import docx  # python-docx
 
 from docx.shared import Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.section import WD_SECTION
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 
 # =========================
-# Feature (1): Version stamp
+# Version stamp (Feature 1)
 # =========================
-APP_VERSION = "v0.6.0"
+APP_VERSION = "v0.7.0"
 APP_BUILD_DATE = "Jan 9, 2026"
 
 st.set_page_config(page_title="Path – Federal Proposal Generator", layout="wide")
@@ -76,7 +78,7 @@ def b64_decode_bytes(s: str) -> Optional[bytes]:
 
 
 # =========================
-# Feature (3): PDF diagnostics + extraction
+# PDF diagnostics + extraction (Feature 3)
 # =========================
 def extract_text_from_pdf(file_bytes: bytes) -> Tuple[str, Dict[str, Any]]:
     diag = {
@@ -309,7 +311,7 @@ def compliance_warnings(rules: Dict[str, List[str]], forms: List[str], amendment
 
 
 # =========================
-# Company Info + Signature Fields
+# Company Info
 # =========================
 @dataclass
 class CompanyInfo:
@@ -355,9 +357,6 @@ class CompanyInfo:
         return c
 
 
-# =========================
-# Missing Info Alerts
-# =========================
 def missing_info_alerts(company: CompanyInfo) -> Tuple[List[str], List[str]]:
     critical = []
     recommended = []
@@ -393,7 +392,7 @@ def missing_info_alerts(company: CompanyInfo) -> Tuple[List[str], List[str]]:
 
 
 # =========================
-# Draft Generator (with signature block)
+# Draft generation
 # =========================
 def _signature_block(company: CompanyInfo) -> str:
     signer_name = company.signer_name.strip() or company.poc_name.strip()
@@ -509,9 +508,9 @@ No direct past performance provided. {company.legal_name or "[Company Name]"} wi
 - Risk mitigation and escalation procedures
 """
 
+    vol_block = "; ".join(vols) if vols else "Not detected"
     forms_block = "\n".join([f"- {f}" for f in forms]) if forms else "- None detected"
     att_block = "\n".join([f"- {a}" for a in attachments[:10]]) if attachments else "- None detected"
-    vol_block = "; ".join(vols) if vols else "Not detected"
 
     compliance = f"""COMPLIANCE SNAPSHOT (STARTER)
 
@@ -538,7 +537,7 @@ Attachment/Appendix/Exhibit mentions:
 
 
 # =========================
-# Compliance Checklist v1
+# Checklist
 # =========================
 def build_checklist_items(
     rules: Dict[str, List[str]],
@@ -589,9 +588,17 @@ def build_checklist_items(
 
 
 # =========================
-# Feature (4): Requirement Extraction v3 (multi-line grouping)
+# Feature (5): L/M Targeting v2 + Requirement Extraction v3
 # =========================
 REQ_TRIGGER = re.compile(r"\b(shall|must|will)\b", re.IGNORECASE)
+
+LM_ANCHORS = [
+    ("Section L", re.compile(r"\bsection\s+l\b", re.IGNORECASE)),
+    ("Instructions to Offerors", re.compile(r"\binstructions?\s+to\s+offerors?\b", re.IGNORECASE)),
+    ("Proposal Preparation", re.compile(r"\bproposal\s+preparation\b|\bproposal\s+preparation\s+instructions\b|\bproposal\s+submission\b", re.IGNORECASE)),
+    ("Section M", re.compile(r"\bsection\s+m\b", re.IGNORECASE)),
+    ("Evaluation Criteria", re.compile(r"\bevaluation\s+criteria\b|\bevaluation\s+factors?\b", re.IGNORECASE)),
+]
 
 def looks_like_bullet(line: str) -> bool:
     s = line.strip()
@@ -600,88 +607,108 @@ def looks_like_bullet(line: str) -> bool:
 def indent_level(line: str) -> int:
     return len(line) - len(line.lstrip(" "))
 
-def extract_requirements_v3(rfp_text: str, max_reqs: int = 80) -> List[Dict[str, str]]:
+def build_target_windows(raw_lines: List[str]) -> Tuple[List[Tuple[int, int, str]], List[str]]:
     """
-    v3:
-    - Build "blocks" of multi-line bullets / indented sub-bullets.
-    - Prefer blocks near Section L/M / Instructions / Evaluation.
-    - Only keep blocks that contain shall/must/will OR contain offeror/proposal/submit instructions.
+    Returns:
+      windows: list of (start, end, label)
+      found_labels: list of labels found
     """
+    idxs = []
+    labels_found = []
+
+    for i, line in enumerate(raw_lines):
+        for label, pat in LM_ANCHORS:
+            if pat.search(line):
+                idxs.append((i, label))
+                labels_found.append(label)
+
+    labels_found = unique_keep_order(labels_found)
+
+    windows = []
+    for i, label in idxs[:12]:
+        start = max(0, i - 120)
+        end = min(len(raw_lines), i + 520)
+        windows.append((start, end, label))
+
+    # If nothing found, fall back to whole doc
+    if not windows:
+        windows = [(0, len(raw_lines), "Whole Document (fallback)")]
+
+    # Merge overlapping windows
+    windows.sort(key=lambda x: x[0])
+    merged = []
+    for w in windows:
+        if not merged:
+            merged.append(list(w))
+        else:
+            prev = merged[-1]
+            if w[0] <= prev[1]:
+                prev[1] = max(prev[1], w[1])
+                # keep most informative label if prev is fallback
+                if prev[2].startswith("Whole") and not w[2].startswith("Whole"):
+                    prev[2] = w[2]
+            else:
+                merged.append(list(w))
+    return [(a, b, c) for a, b, c in merged], labels_found
+
+def extract_requirements_targeted_v3(rfp_text: str, max_reqs: int = 90) -> Tuple[List[Dict[str, str]], str]:
     raw = scan_raw_lines(rfp_text, max_lines=20000)
     if not raw:
-        return []
+        return [], "No text"
 
-    # Find L/M-ish anchor indexes (best-effort)
-    anchors = []
-    for i, line in enumerate(raw):
-        l = line.lower()
-        if "section l" in l or "instructions to offerors" in l or "proposal preparation" in l:
-            anchors.append(i)
-        if "section m" in l or "evaluation criteria" in l or "evaluation factors" in l:
-            anchors.append(i)
+    windows, labels_found = build_target_windows(raw)
+    source_note = ", ".join(labels_found) if labels_found else "Whole Document (fallback)"
 
-    # Build blocks: start at bullet lines; absorb indented lines that follow
-    blocks: List[Tuple[int, str]] = []  # (line_index, block_text)
-    i = 0
-    while i < len(raw):
-        line = raw[i]
-        if looks_like_bullet(line):
-            base_indent = indent_level(line)
-            block_lines = [normalize_line(line)]
-            j = i + 1
-            while j < len(raw):
-                nxt = raw[j]
-                if looks_like_bullet(nxt) and indent_level(nxt) <= base_indent:
-                    break
-                if indent_level(nxt) > base_indent or nxt.strip().startswith(("(", "-", "•", "*")):
-                    block_lines.append(normalize_line(nxt))
-                    j += 1
-                    continue
-                if normalize_line(nxt).endswith(":"):
-                    block_lines.append(normalize_line(nxt))
-                    j += 1
-                    continue
-                if len(normalize_line(nxt)) > 80 and indent_level(nxt) >= base_indent:
-                    block_lines.append(normalize_line(nxt))
-                    j += 1
-                    continue
-                break
-
-            block_text = " ".join(block_lines).strip()
-            blocks.append((i, block_text))
-            i = j
-        else:
-            i += 1
-
-    # Also treat strong instruction lines as single-line blocks (fallback)
-    for idx, line in enumerate(raw):
-        s = normalize_line(line)
-        if len(s) < 40:
-            continue
-        if REQ_TRIGGER.search(s) and ("offeror" in s.lower() or "proposal" in s.lower() or "submit" in s.lower()):
-            blocks.append((idx, s))
-
-    # Score blocks: prioritize near anchors
-    def score_block(idx: int, txt: str) -> int:
+    def score_block(txt: str) -> int:
         score = 0
+        low = txt.lower()
         if REQ_TRIGGER.search(txt):
             score += 4
-        low = txt.lower()
-        if "offeror" in low or "proposal" in low or "submit" in low or "shall" in low or "must" in low:
+        if "offeror" in low or "proposal" in low or "submit" in low:
             score += 2
-        # proximity to anchors
-        if anchors:
-            dist = min(abs(idx - a) for a in anchors)
-            if dist < 150:
-                score += 3
-            elif dist < 400:
-                score += 1
-        # preference: contains keywords
-        if any(k in low for k in ["volume", "format", "page", "font", "margin", "attach", "include", "complete"]):
+        if any(k in low for k in ["volume", "format", "page", "font", "margin", "attach", "include", "complete", "sign", "acknowledge"]):
             score += 1
         return score
 
-    # Filter + sort
+    blocks: List[Tuple[int, str]] = []
+
+    # Build blocks inside each target window
+    for start, end, _label in windows:
+        i = start
+        while i < end:
+            line = raw[i]
+            if looks_like_bullet(line):
+                base_indent = indent_level(line)
+                block_lines = [normalize_line(line)]
+                j = i + 1
+                while j < end:
+                    nxt = raw[j]
+                    # new peer bullet ends the block
+                    if looks_like_bullet(nxt) and indent_level(nxt) <= base_indent:
+                        break
+                    # indented / sub-bullet continues
+                    if indent_level(nxt) > base_indent or nxt.strip().startswith(("(", "-", "•", "*")):
+                        block_lines.append(normalize_line(nxt))
+                        j += 1
+                        continue
+                    # long wrapped lines continue
+                    if len(normalize_line(nxt)) > 70 and indent_level(nxt) >= base_indent:
+                        block_lines.append(normalize_line(nxt))
+                        j += 1
+                        continue
+                    break
+                block_text = " ".join(block_lines).strip()
+                blocks.append((i, block_text))
+                i = j
+            else:
+                # Also capture strong single lines in target zones
+                s = normalize_line(line)
+                low = s.lower()
+                if len(s) >= 45 and (REQ_TRIGGER.search(s) or ("offeror" in low and "shall" in low) or ("proposal" in low and "submit" in low)):
+                    blocks.append((i, s))
+                i += 1
+
+    # Filter + dedupe + sort
     seen = set()
     scored = []
     for idx, txt in blocks:
@@ -698,17 +725,17 @@ def extract_requirements_v3(rfp_text: str, max_reqs: int = 80) -> List[Dict[str,
         if not keep:
             continue
 
-        scored.append((score_block(idx, t), idx, t))
+        scored.append((score_block(t), idx, t))
 
     scored.sort(key=lambda x: (-x[0], x[1]))
 
     reqs = []
     rid = 1
     for _, _, t in scored[:max_reqs]:
-        reqs.append({"id": f"R{rid:03d}", "requirement": t, "source": "RFP (grouped bullets v3)"})
+        reqs.append({"id": f"R{rid:03d}", "requirement": t, "source": f"Targeted: {source_note}"})
         rid += 1
 
-    return reqs
+    return reqs, source_note
 
 
 DEFAULT_SECTIONS = [
@@ -733,13 +760,67 @@ def auto_map_section(req_text: str) -> str:
         return "Executive Summary"
     if "cover letter" in t or "signed" in t or "signature" in t:
         return "Cover Letter"
-    if "compliance" in t or "matrix" in t or "section l" in t or "section m" in t:
+    if "compliance" in t or "matrix" in t or "section l" in t or "section m" in t or "evaluation" in t:
         return "Compliance Snapshot"
     return "Technical Approach"
 
 
 # =========================
-# DOCX Export (title + TOC + page nums)
+# Feature (8): Per-requirement response generator
+# =========================
+def generate_requirement_response(req_text: str, company: CompanyInfo, keywords: List[str]) -> str:
+    kw = ", ".join(keywords[:10]) if keywords else "quality, schedule, reporting, risk"
+    caps = company.capabilities.strip() or "[Add capabilities]"
+    diffs = company.differentiators.strip() or "[Add differentiators]"
+
+    return f"""REQUIREMENT RESPONSE (DRAFT)
+
+Requirement:
+{req_text}
+
+Approach:
+- {company.legal_name or "[Company Name]"} will address this requirement using a structured plan aligned to: {kw}.
+- We will confirm acceptance criteria, produce objective evidence, and maintain traceability to Section L/M.
+
+Deliverables / Evidence:
+- [List deliverables tied to this requirement]
+- [List evidence artifacts: reports, logs, checklists, screenshots, sign-offs, etc.]
+
+Execution & Controls:
+- Quality: peer review + QC checklist before submission
+- Reporting: weekly status, risks/issues log, action tracker
+- Risk: identify early, mitigate, communicate options
+
+Why Us:
+Capabilities:
+{caps}
+
+Differentiators:
+{diffs}
+"""
+
+
+# =========================
+# Feature (7): Matrix CSV export
+# =========================
+def matrix_to_csv_bytes(matrix_rows: List[Dict[str, str]]) -> bytes:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["Req ID", "Requirement", "Mapped Section", "Status", "Notes", "Source"])
+    for r in matrix_rows:
+        writer.writerow([
+            r.get("id", ""),
+            r.get("requirement", ""),
+            r.get("section", ""),
+            r.get("status", "Unknown"),
+            r.get("notes", ""),
+            r.get("source", ""),
+        ])
+    return output.getvalue().encode("utf-8")
+
+
+# =========================
+# Word Export v2 (Feature 9): Title page separate + header/footer + page nums after title page
 # =========================
 def add_field(paragraph, field_code: str):
     run = paragraph.add_run()
@@ -763,15 +844,21 @@ def add_field(paragraph, field_code: str):
     r.append(fldChar2)
     r.append(fldChar3)
 
-def add_page_numbers(doc: docx.Document):
-    section = doc.sections[0]
+def set_header_footer_for_section(section, header_text: str):
+    # Header
+    header = section.header
+    hp = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
+    hp.text = header_text
+    hp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # Footer with page numbering
     footer = section.footer
-    p = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.add_run("Page ")
-    add_field(p, "PAGE")
-    p.add_run(" of ")
-    add_field(p, "NUMPAGES")
+    fp = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+    fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    fp.add_run("Page ")
+    add_field(fp, "PAGE")
+    fp.add_run(" of ")
+    add_field(fp, "NUMPAGES")
 
 def add_table_of_contents(doc: docx.Document):
     doc.add_page_break()
@@ -821,7 +908,12 @@ def add_title_page(doc: docx.Document, company: CompanyInfo, logo_bytes: Optiona
     p5.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p5.add_run(f"UEI: {company.uei or '[UEI]'}    CAGE: {company.cage or '[CAGE]'}")
 
-    doc.add_page_break()
+    doc.add_paragraph("")
+    p6 = doc.add_paragraph()
+    p6.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    p6.add_run("Submitted By: ").bold = True
+    doc.add_paragraph(f"{company.address or ''}")
+    doc.add_paragraph("")
 
 def add_paragraph_lines(doc: docx.Document, text: str):
     for line in text.splitlines():
@@ -839,13 +931,23 @@ def build_proposal_docx_bytes(
     warnings: List[str],
     checklist_items: List[Dict[str, str]],
     matrix_rows: List[Dict[str, str]],
-    drafts: Dict[str, str]
+    drafts: Dict[str, str],
+    lm_source_note: str,
 ) -> bytes:
     doc = docx.Document()
-    add_page_numbers(doc)
+
+    # Section 0: Title page ONLY (no page numbering)
     add_title_page(doc, company, logo_bytes)
+
+    # Section 1: rest of document, new page, header/footer + page numbering
+    doc.add_section(WD_SECTION.NEW_PAGE)
+    header_text = f"{company.legal_name or 'Company'} | {company.solicitation_number or 'Solicitation'} | {company.proposal_title or 'Proposal'}"
+    set_header_footer_for_section(doc.sections[1], header_text)
+
+    # TOC
     add_table_of_contents(doc)
 
+    # Company profile
     doc.add_heading("Company Profile", level=1)
     certs = ", ".join(company.certifications or []) if company.certifications else "—"
     profile = f"""Company: {company.legal_name or "—"}
@@ -858,11 +960,15 @@ Website: {company.website or "—"}
 """
     add_paragraph_lines(doc, profile)
 
+    # Checklist
     doc.add_heading("Submission Checklist (Compliance Checklist v1)", level=1)
     for it in checklist_items:
         doc.add_paragraph(f"☐ {it['item']}  ({it['status']})", style="List Bullet")
 
-    doc.add_heading("Compliance Matrix v3 (Grouped Requirements)", level=1)
+    # Matrix
+    doc.add_heading("Compliance Matrix (Targeted v2 / Grouped v3)", level=1)
+    doc.add_paragraph(f"Extraction focus: {lm_source_note}", style="List Bullet")
+
     if matrix_rows:
         table = doc.add_table(rows=1, cols=5)
         hdr = table.rows[0].cells
@@ -872,7 +978,7 @@ Website: {company.website or "—"}
         hdr[3].text = "Status"
         hdr[4].text = "Notes"
 
-        for row in matrix_rows[:80]:
+        for row in matrix_rows[:120]:
             r = table.add_row().cells
             r[0].text = row.get("id", "")
             r[1].text = row.get("requirement", "")
@@ -882,6 +988,7 @@ Website: {company.website or "—"}
     else:
         doc.add_paragraph("No requirements extracted yet.", style="List Bullet")
 
+    # Detected evidence sections
     doc.add_heading("Detected Submission Rules (Starter)", level=2)
     if rules:
         for k, lines in rules.items():
@@ -923,6 +1030,7 @@ Website: {company.website or "—"}
     for w in warnings:
         doc.add_paragraph(w, style="List Bullet")
 
+    # Drafts
     doc.add_page_break()
     doc.add_heading("Draft Proposal Sections", level=1)
     for title, body in drafts.items():
@@ -935,7 +1043,7 @@ Website: {company.website or "—"}
 
 
 # =========================
-# Feature (2): Save / Load Project
+# Save / Load Project (Feature 2)
 # =========================
 def serialize_project_state() -> dict:
     company: CompanyInfo = st.session_state.company
@@ -944,6 +1052,7 @@ def serialize_project_state() -> dict:
         "app_build_date": APP_BUILD_DATE,
         "rfp_text": st.session_state.rfp_text,
         "pdf_diag": st.session_state.get("pdf_diag", {}),
+        "lm_source_note": st.session_state.get("lm_source_note", ""),
         "rules": st.session_state.rules,
         "forms": st.session_state.forms,
         "attachments": st.session_state.attachments,
@@ -963,6 +1072,7 @@ def serialize_project_state() -> dict:
 def load_project_state(payload: dict):
     st.session_state.rfp_text = payload.get("rfp_text", "") or ""
     st.session_state.pdf_diag = payload.get("pdf_diag", {}) or {}
+    st.session_state.lm_source_note = payload.get("lm_source_note", "") or ""
     st.session_state.rules = payload.get("rules", {}) or {}
     st.session_state.forms = payload.get("forms", []) or []
     st.session_state.attachments = payload.get("attachments", []) or []
@@ -989,6 +1099,8 @@ if "rfp_text" not in st.session_state:
     st.session_state.rfp_text = ""
 if "pdf_diag" not in st.session_state:
     st.session_state.pdf_diag = {}
+if "lm_source_note" not in st.session_state:
+    st.session_state.lm_source_note = ""
 if "rules" not in st.session_state:
     st.session_state.rules = {}
 if "forms" not in st.session_state:
@@ -1018,13 +1130,13 @@ if "matrix_rows" not in st.session_state:
 
 
 # =========================
-# Sidebar (version stamp + save/load)
+# Sidebar
 # =========================
 st.sidebar.title("Path")
 st.sidebar.caption(f"{APP_VERSION} • {APP_BUILD_DATE}")
 
 page = st.sidebar.radio("Go to", ["RFP Intake", "Company Info", "Proposal Output"])
-st.sidebar.caption("Flow: Upload/Paste → Analyze → Drafts → Export")
+st.sidebar.caption("Flow: Upload/Paste → Analyze → Matrix → Drafts → Export")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Save / Load Project")
@@ -1066,13 +1178,11 @@ if page == "RFP Intake":
         if uploaded:
             text, diag = read_uploaded_file(uploaded)
             st.session_state.pdf_diag = diag or {}
-
             if not text.strip():
                 st.warning("File uploaded, but no text could be extracted. If PDF is scanned, we’ll need OCR later.")
 
         if pasted.strip():
             text = pasted.strip()
-            # keep existing diag if any
             if not st.session_state.pdf_diag:
                 st.session_state.pdf_diag = {"file_type": "pasted_text", "chars_extracted": len(text), "likely_scanned": False}
 
@@ -1091,8 +1201,10 @@ if page == "RFP Intake":
             st.session_state.keywords = derive_tailor_keywords(st.session_state.sow_snips)
             st.session_state.required_certs = detect_required_certifications(text)
 
-            # Feature (4): requirements v3
-            extracted = extract_requirements_v3(text)
+            # Feature (5): targeted extraction
+            extracted, lm_note = extract_requirements_targeted_v3(text)
+            st.session_state.lm_source_note = lm_note
+
             matrix_rows = []
             for r in extracted:
                 matrix_rows.append({
@@ -1101,6 +1213,7 @@ if page == "RFP Intake":
                     "section": auto_map_section(r["requirement"]),
                     "status": "Unknown",
                     "notes": "",
+                    "source": r.get("source", ""),
                 })
             st.session_state.matrix_rows = matrix_rows
 
@@ -1133,7 +1246,7 @@ if page == "RFP Intake":
 # =========================
 elif page == "Company Info":
     st.title("2) Company Info")
-    st.caption("Fill this out once. It auto-fills drafts and the export title page and signature block.")
+    st.caption("Fill this out once. It auto-fills drafts and export title page, header/footer, and signature block.")
 
     c: CompanyInfo = st.session_state.company
 
@@ -1212,8 +1325,26 @@ else:
     c: CompanyInfo = st.session_state.company
     logo_bytes = st.session_state.logo_bytes
     matrix_rows = st.session_state.matrix_rows or []
+    lm_source_note = st.session_state.get("lm_source_note", "") or "—"
+    kws = st.session_state.keywords or []
 
-    st.subheader("A) Missing Info Alerts (fix before submission)")
+    # Feature (6): Compliance score KPI box
+    total = len(matrix_rows)
+    p = sum(1 for r in matrix_rows if r.get("status") == "Pass")
+    f = sum(1 for r in matrix_rows if r.get("status") == "Fail")
+    u = sum(1 for r in matrix_rows if r.get("status") == "Unknown" or not r.get("status"))
+    score = (p / total * 100.0) if total > 0 else 0.0
+
+    st.subheader("A) Compliance KPI")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Compliance %", f"{score:.0f}%")
+    c2.metric("Pass", str(p))
+    c3.metric("Fail", str(f))
+    c4.metric("Unknown", str(u))
+    st.caption(f"Requirement extraction focus: {lm_source_note}")
+
+    st.markdown("---")
+    st.subheader("B) Missing Info Alerts (fix before submission)")
     crit, rec = missing_info_alerts(c)
     if crit:
         for x in crit:
@@ -1222,13 +1353,27 @@ else:
         st.success("No critical company-info fields missing.")
     for x in rec:
         st.warning(x)
-
     if required_certs:
         st.info("RFP mentions these certification types (starter detection): " + ", ".join(required_certs))
 
     st.markdown("---")
-    st.subheader("B) Compliance Matrix v3 (grouped requirements)")
-    st.caption("Grouped bullet/indented requirements. Map each requirement to a section and set Pass/Fail/Unknown.")
+
+    # Feature (7): Matrix Export CSV
+    st.subheader("C) Compliance Matrix + CSV Export")
+    if matrix_rows:
+        csv_bytes = matrix_to_csv_bytes(matrix_rows)
+        st.download_button(
+            "Download Compliance Matrix (.csv)",
+            data=csv_bytes,
+            file_name="compliance_matrix.csv",
+            mime="text/csv",
+        )
+    else:
+        st.info("No matrix rows yet. Run Analyze first.")
+
+    st.markdown("---")
+    st.subheader("D) Compliance Matrix (Targeted v2 / Grouped v3)")
+    st.caption("Map each requirement to a proposal section and set Pass/Fail/Unknown. Use Generate Response Draft to build content fast.")
 
     if not matrix_rows:
         st.warning("No requirements extracted yet. Upload/paste full solicitation (especially Section L/M) and re-run Analyze.")
@@ -1242,6 +1387,9 @@ else:
         for row in matrix_rows[:50]:
             with st.expander(f"{row['id']} — {row['requirement'][:90]}{'...' if len(row['requirement'])>90 else ''}", expanded=False):
                 st.write("**Requirement:**", row["requirement"])
+                if row.get("source"):
+                    st.caption(row["source"])
+
                 col1, col2, col3 = st.columns([1.2, 1, 1.2])
                 with col1:
                     row["section"] = st.selectbox(
@@ -1260,6 +1408,15 @@ else:
                 with col3:
                     row["notes"] = st.text_input("Notes", value=row.get("notes", ""), key=f"note_{row['id']}")
 
+                # Feature (8): Generate Response Draft
+                draft_key = row.get("section") if row.get("section") and row.get("section") != "Other / Add New Section" else f"{row['id']} Requirement Response"
+                if st.button("Generate Response Draft", key=f"genresp_{row['id']}"):
+                    drafts = st.session_state.drafts or {}
+                    drafts[draft_key] = generate_requirement_response(row["requirement"], c, kws)
+                    st.session_state.drafts = drafts
+                    st.success(f"Draft created/updated: {draft_key}")
+
+                # Existing: add missing section if user chose "Other"
                 if row["section"] == "Other / Add New Section":
                     new_title_default = f"{row['id']} Requirement Response"
                     new_title = st.text_input("New section title", value=new_title_default, key=f"newtitle_{row['id']}")
@@ -1274,7 +1431,7 @@ else:
         st.session_state.matrix_rows = matrix_rows
 
     st.markdown("---")
-    st.subheader("C) Submission Rules Found (starter)")
+    st.subheader("E) Submission Rules Found (starter)")
     if rules:
         for label, lines in rules.items():
             with st.expander(label, expanded=False):
@@ -1284,13 +1441,13 @@ else:
         st.write("No obvious submission rules detected yet. Upload full solicitation or paste Section L/M.")
 
     st.markdown("---")
-    st.subheader("D) Forms & Attachments Detected (starter)")
+    st.subheader("F) Forms & Attachments Detected (starter)")
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("**Forms (SF/DD) Found**")
         if forms:
-            for f in forms:
-                st.write("•", f)
+            for ff in forms:
+                st.write("•", ff)
         else:
             st.write("No SF/DD forms detected.")
     with col2:
@@ -1309,7 +1466,7 @@ else:
         st.write("No obvious attachment references detected.")
 
     st.markdown("---")
-    st.subheader("E) Compliance Warnings (starter)")
+    st.subheader("G) Compliance Warnings (starter)")
     warns = compliance_warnings(rules, forms, amendments, separate)
     for w in warns:
         st.warning(w)
@@ -1319,7 +1476,7 @@ else:
             st.write("•", ln)
 
     st.markdown("---")
-    st.subheader("F) Compliance Checklist v1 (check things off)")
+    st.subheader("H) Compliance Checklist v1 (check things off)")
     checklist_items = build_checklist_items(rules, forms, attachments, amendments, separate, required_certs)
     for idx, it in enumerate(checklist_items):
         key = f"chk_{idx}_{it['source']}"
@@ -1329,8 +1486,7 @@ else:
         st.session_state.checklist_done[key] = st.checkbox(label, value=st.session_state.checklist_done[key], key=key)
 
     st.markdown("---")
-    st.subheader("G) Draft Proposal Sections (template-based)")
-    kws = st.session_state.keywords or []
+    st.subheader("I) Draft Proposal Sections (template-based)")
     if kws:
         st.caption("Tailoring keywords (auto-extracted): " + ", ".join(kws[:10]))
     else:
@@ -1356,7 +1512,7 @@ else:
         st.info("Generate drafts to enable export.")
 
     st.markdown("---")
-    st.subheader("H) Export (Professional Word Proposal Package)")
+    st.subheader("J) Export (Professional Word Proposal Package v2)")
     if drafts:
         doc_bytes = build_proposal_docx_bytes(
             company=c,
@@ -1370,7 +1526,8 @@ else:
             warnings=warns,
             checklist_items=checklist_items,
             matrix_rows=st.session_state.matrix_rows or [],
-            drafts=drafts
+            drafts=drafts,
+            lm_source_note=lm_source_note,
         )
         st.download_button(
             label="Download Proposal Package (.docx)",
@@ -1378,6 +1535,6 @@ else:
             file_name="proposal_package.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
-        st.caption("Note: In Word, right-click the Table of Contents → Update Field → Update entire table.")
+        st.caption("In Word: right-click the Table of Contents → Update Field → Update entire table.")
     else:
         st.write("Generate draft sections first, then export.")
