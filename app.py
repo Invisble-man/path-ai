@@ -1,837 +1,783 @@
-import os
+import streamlit as st
 import re
-import uuid
 import json
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime
 from typing import Dict, Any, List, Tuple
 
-import streamlit as st
+import pandas as pd
 
-# ---------------------------
-# Postgres persistence (Render)
-# ---------------------------
-from sqlalchemy import create_engine, Column, String, DateTime, Text
-from sqlalchemy.orm import declarative_base, sessionmaker
+# Exports
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from io import BytesIO
 
-APP_VERSION = "v1.3.0 • Jan 09, 2026"
+APP_NAME = "Path.ai"
+APP_VERSION = "v2.0.0"
+APP_DATE = datetime.now().strftime("%b %d, %Y")
 
-Base = declarative_base()
-
-class ProposalRun(Base):
-    __tablename__ = "proposal_runs"
-
-    run_id = Column(String, primary_key=True)
-    name = Column(String, nullable=True)
-    created_at = Column(DateTime, nullable=False)
-    updated_at = Column(DateTime, nullable=False)
-    data_json = Column(Text, nullable=False)
-
-
-def _normalize_database_url(url: str) -> str:
-    if not url:
-        return ""
-    url = url.strip()
-    if url.startswith("postgres://"):
-        return url.replace("postgres://", "postgresql+psycopg2://", 1)
-    if url.startswith("postgresql://"):
-        return url.replace("postgresql://", "postgresql+psycopg2://", 1)
-    return url
-
-
-@st.cache_resource
-def get_db():
-    db_url = _normalize_database_url(os.getenv("DATABASE_URL", "").strip())
-    if not db_url:
-        return None, None
-
-    engine = create_engine(db_url, pool_pre_ping=True)
-    Base.metadata.create_all(engine)
-    SessionLocal = sessionmaker(bind=engine)
-    return engine, SessionLocal
-
-
-def db_load_run(run_id: str) -> Dict[str, Any] | None:
-    _, SessionLocal = get_db()
-    if SessionLocal is None:
-        return None
-    with SessionLocal() as s:
-        row = s.get(ProposalRun, run_id)
-        if not row:
-            return None
-        try:
-            return json.loads(row.data_json)
-        except Exception:
-            return None
-
-
-def db_save_run(run_id: str, state: Dict[str, Any], name: str | None = None):
-    _, SessionLocal = get_db()
-    if SessionLocal is None:
-        return
-
-    now = datetime.now(timezone.utc)
-    payload = json.dumps(state, ensure_ascii=False)
-
-    with SessionLocal() as s:
-        row = s.get(ProposalRun, run_id)
-        if not row:
-            row = ProposalRun(
-                run_id=run_id,
-                name=name or "",
-                created_at=now,
-                updated_at=now,
-                data_json=payload,
-            )
-            s.add(row)
-        else:
-            row.updated_at = now
-            if name is not None:
-                row.name = name
-            row.data_json = payload
-        s.commit()
-
-
-def db_list_runs(limit: int = 25) -> List[Tuple[str, str, str]]:
-    _, SessionLocal = get_db()
-    if SessionLocal is None:
-        return []
-    with SessionLocal() as s:
-        rows = (
-            s.query(ProposalRun)
-            .order_by(ProposalRun.updated_at.desc())
-            .limit(limit)
-            .all()
-        )
-        out = []
-        for r in rows:
-            updated = r.updated_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            out.append((r.run_id, (r.name or "").strip() or "Untitled Run", updated))
-        return out
-
-
-# ---------------------------
-# Data model (items + gating)
-# ---------------------------
-GATING_ACTIONABLE = "ACTIONABLE"
-GATING_INFORMATIONAL = "INFORMATIONAL"
-GATING_IRRELEVANT = "IRRELEVANT"
-GATING_AUTO = "AUTO_RESOLVED"
-
-STATUS_UNKNOWN = "Unknown"
-STATUS_PASS = "Pass"
-STATUS_FAIL = "Fail"
+GATING = ["ACTIONABLE", "INFORMATIONAL", "IRRELEVANT", "AUTO_RESOLVED"]
+STATUS = ["Unknown", "Pass", "Fail"]
 
 BUCKETS = [
-    "Missing Critical Fields",
     "Submission & Format",
     "Required Forms",
     "Volume I – Technical",
     "Volume III – Price/Cost",
-    "Attachments / Exhibits",
+    "Attachments/Exhibits",
     "Other",
 ]
 
-PAGES = ["Task List", "Intake", "Company", "Compliance", "Draft", "Export"]
+# -----------------------------
+# UI Styling (calm + inviting)
+# -----------------------------
+CSS = """
+<style>
+.block-container { max-width: 1120px; padding-top: 1.2rem; }
 
-REQ_ID_RE = re.compile(r"\bR\d{3}\b", re.IGNORECASE)
+.path-hero{
+  border-radius: 18px;
+  padding: 18px 18px;
+  background: linear-gradient(180deg, rgba(59,130,246,0.10), rgba(34,197,94,0.08));
+  border: 1px solid rgba(0,0,0,0.08);
+}
+.path-brand{
+  display:flex; align-items:center; justify-content:space-between; gap:14px;
+}
+.path-title{ font-size: 40px; font-weight: 900; letter-spacing: -0.8px; }
+.path-sub{ opacity: 0.75; margin-top: 6px; font-size: 16px; }
+.path-meta{ opacity: 0.7; font-size: 13px; }
 
+.big-btn .stButton button{
+  width: 100%;
+  padding: 14px 16px !important;
+  font-size: 18px !important;
+  font-weight: 800 !important;
+  border-radius: 14px !important;
+}
 
-def new_empty_state() -> Dict[str, Any]:
+.chips{ display:flex; gap:10px; flex-wrap:wrap; margin-top: 12px; }
+.chip{
+  display:inline-flex; align-items:center; gap:8px;
+  padding: 10px 14px; border-radius: 999px;
+  font-weight: 800;
+  border: 1px solid rgba(0,0,0,0.08);
+}
+.chip small{ font-weight: 700; opacity: 0.85; }
+.green{ background: rgba(34,197,94,0.12); color: rgb(18,118,54); }
+.yellow{ background: rgba(234,179,8,0.14); color: rgb(146,108,0); }
+.red{ background: rgba(239,68,68,0.12); color: rgb(164,33,33); }
+.blue{ background: rgba(59,130,246,0.12); color: rgb(20,71,158); }
+.gray{ background: rgba(148,163,184,0.16); color: rgb(60,74,95); }
+
+.h2{ font-size: 28px; font-weight: 900; margin-top: 12px; }
+.subtle{ opacity: 0.75; }
+
+.task{
+  border: 1px solid rgba(0,0,0,0.08);
+  border-radius: 16px;
+  padding: 12px 12px;
+  margin-bottom: 10px;
+  background: rgba(255,255,255,0.65);
+}
+.task-top{ display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
+.badge{
+  font-size: 12px; font-weight: 900;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(0,0,0,0.08);
+  background: rgba(59,130,246,0.08);
+}
+hr.soft{ border:none; border-top:1px solid rgba(0,0,0,0.08); margin: 12px 0; }
+
+/* Tabs look like nav */
+.stTabs [data-baseweb="tab-list"] button{
+  font-size: 16px !important;
+  padding: 12px 14px !important;
+  font-weight: 800 !important;
+}
+</style>
+"""
+
+st.set_page_config(page_title=APP_NAME, layout="wide")
+st.markdown(CSS, unsafe_allow_html=True)
+
+# -----------------------------
+# State
+# -----------------------------
+def now_iso() -> str:
+    return datetime.utcnow().isoformat()
+
+def new_state() -> Dict[str, Any]:
     return {
-        "app_version": APP_VERSION,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "run_name": "",
+        "run_id": str(uuid.uuid4())[:8],
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
         "intake": {
-            "source_text": "",
-            "notes": "",
+            "title": "",
+            "agency": "",
+            "rfp_number": "",
+            "due_date": "",
+            "submission_method": "",
+            "submission_destination": "",
+            "format_rules": "",
+            "raw_text": "",
         },
         "company": {
-            "company_name": "",
+            "name": "",
             "uei": "",
             "cage": "",
             "address": "",
-            "email": "",
-            "phone": "",
+            "poc_name": "",
+            "poc_email": "",
+            "poc_phone": "",
+            "naics": "",
         },
         "items": [],
         "gate": {
-            "last_run_at": None,
             "status": "GATE NOT RUN",
-            "rules": {"max_unknown": 0, "max_fail": 0},
-        },
-        "draft": {
-            "outline": "",
-            "notes": "",
-        },
-        "export": {
-            "last_export_at": None,
+            "last_run_at": None,
         },
     }
 
+def get_state() -> Dict[str, Any]:
+    if "state" not in st.session_state:
+        st.session_state.state = new_state()
+    return st.session_state.state
 
-def ensure_item_shape(item: Dict[str, Any]) -> Dict[str, Any]:
-    item.setdefault("id", f"I{uuid.uuid4().hex[:10]}")
-    item.setdefault("req_id", "")
-    item.setdefault("text", "")
-    item.setdefault("bucket", "Other")
-    item.setdefault("mapped_section", "")
-    item.setdefault("gating_label", GATING_ACTIONABLE)
-    item.setdefault("confidence", 0.50)
-    item.setdefault("status", STATUS_UNKNOWN)
-    item.setdefault("done", False)
-    item.setdefault("notes", "")
-    item.setdefault("source", "intake")
-    item.setdefault("created_at", datetime.now(timezone.utc).isoformat())
-    return item
+def save_state():
+    st.session_state.state["updated_at"] = now_iso()
 
+# -----------------------------
+# Extraction (baseline)
+# -----------------------------
+REQ_PATTERNS = [
+    r"\b(shall|must|required|will be rejected|offer due|proposal shall)\b",
+    r"\b(SF ?1449|SF1449)\b",
+    r"\b(attachment|exhibit|volume|section)\b",
+]
 
-# ---------------------------
-# Relevance gating (rule engine)
-# ---------------------------
-def infer_bucket(text: str) -> str:
-    t = (text or "").lower()
+def split_requirements(raw_text: str) -> List[str]:
+    """
+    Lightweight extraction:
+    - split by newlines
+    - keep lines with requirement-ish language
+    - de-dupe
+    """
+    lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
+    candidates = []
+    for l in lines:
+        low = l.lower()
+        if any(re.search(p, low) for p in REQ_PATTERNS):
+            candidates.append(l)
 
-    if any(k in t for k in ["offer due", "due date", "deadline", "submit", "submission", "electronic", "format", "pdf", "font", "margin", "page limit", "file format"]):
-        return "Submission & Format"
-    if any(k in t for k in ["sf1449", "sf 1449", "uei", "cage", "representations", "certifications", "sam.gov"]):
+    # de-dupe while preserving order
+    seen = set()
+    out = []
+    for c in candidates:
+        key = re.sub(r"\s+", " ", c).strip().lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(c)
+    return out[:250]  # safety cap
+
+# -----------------------------
+# Relevance gating classifier (rules-based v1)
+# -----------------------------
+def bucket_for(text: str) -> str:
+    t = text.lower()
+    if "sf1449" in t or "sf 1449" in t or "block" in t:
         return "Required Forms"
-    if any(k in t for k in ["price", "pricing", "cost", "rates", "excel", "spreadsheet", "price sheet", "pricing data", "clins"]):
+    if "price" in t or "pricing" in t or "cost" in t or "excel" in t or "spreadsheet" in t:
         return "Volume III – Price/Cost"
-    if any(k in t for k in ["technical", "approach", "methodology", "sow", "statement of work", "deliverable", "performance"]):
+    if "volume i" in t or "technical" in t or "approach" in t:
         return "Volume I – Technical"
-    if any(k in t for k in ["attachment", "exhibit", "appendix", "addendum"]):
-        return "Attachments / Exhibits"
+    if "attachment" in t or "exhibit" in t:
+        return "Attachments/Exhibits"
+    if "due date" in t or "offer due" in t or "deadline" in t or "submit" in t or "format" in t:
+        return "Submission & Format"
     return "Other"
 
+def classify_item(text: str) -> Tuple[str, float]:
+    """
+    Returns (gating_label, confidence).
+    This is a strict + conservative first pass.
+    """
+    t = text.lower()
 
-def classify_gating(text: str) -> Tuple[str, float]:
-    t = (text or "").strip().lower()
-    if not t or len(t) < 8:
-        return (GATING_IRRELEVANT, 0.95)
+    # AUTO_RESOLVED: statements that don't require user action (policy/boilerplate)
+    if "government shall not be liable" in t or "not liable" in t:
+        return ("AUTO_RESOLVED", 0.85)
 
-    # Noise
-    if "page intentionally left blank" in t or "table of contents" in t:
-        return (GATING_IRRELEVANT, 0.95)
+    # IRRELEVANT: ultra generic or not a requirement (very limited)
+    if len(t) < 12:
+        return ("IRRELEVANT", 0.75)
 
-    # AUTO (contract admin / invoicing terms usually not proposal-fixable)
-    auto_terms = [
-        "invoice", "invoices", "payment", "remit",
-        "the government shall not be liable", "rejected if", "rejected",
-        "contract administration",
+    # ACTIONABLE strong signals
+    actionable_signals = [
+        "shall submit",
+        "must be filled",
+        "offer due",
+        "deadline",
+        "submit invoices",
+        "will be rejected",
+        "proposal shall be submitted",
+        "electronic format",
+        "clearly marked",
+        "attachment",
+        "sf1449",
+        "block",
+        "pricing",
+        "price sheet",
+        "spreadsheet",
+        "file format",
+        "font",
+        "margin",
     ]
-    if any(k in t for k in auto_terms):
-        return (GATING_AUTO, 0.80)
+    score = 0
+    for s in actionable_signals:
+        if s in t:
+            score += 1
 
-    actionable_terms = [
-        "shall", "must", "required", "offeror shall", "contractor shall",
-        "submit", "provide", "include", "complete", "fill",
-        "no later than", "due date", "deadline", "format", "font", "margin",
-    ]
-    info_terms = ["for information", "reference", "see", "as described in", "may be", "reserved"]
+    # If it includes "shall/must" AND includes a noun target, it's likely actionable
+    if ("shall" in t or "must" in t or "required" in t) and score >= 1:
+        conf = min(0.55 + 0.08 * score, 0.95)
+        return ("ACTIONABLE", conf)
 
-    actionable_hits = sum(1 for k in actionable_terms if k in t)
-    info_hits = sum(1 for k in info_terms if k in t)
+    # INFORMATIONAL (reference only)
+    if "shall" in t or "must" in t or "required" in t:
+        return ("INFORMATIONAL", 0.55)
 
-    if actionable_hits >= 2:
-        return (GATING_ACTIONABLE, min(0.95, 0.55 + 0.10 * actionable_hits))
-    if actionable_hits == 1 and info_hits == 0:
-        return (GATING_ACTIONABLE, 0.70)
-    if info_hits >= 1 and actionable_hits == 0:
-        return (GATING_INFORMATIONAL, min(0.90, 0.55 + 0.10 * info_hits))
+    return ("INFORMATIONAL", 0.45)
 
-    return (GATING_INFORMATIONAL, 0.55)
+def build_items(reqs: List[str]) -> List[Dict[str, Any]]:
+    items = []
+    for i, r in enumerate(reqs, start=1):
+        gating_label, conf = classify_item(r)
+        b = bucket_for(r)
 
+        # Only actionable needs user status; auto resolved considered "done"
+        done = False
+        if gating_label == "AUTO_RESOLVED":
+            done = True
 
-# ---------------------------
-# Extraction (starter)
-# ---------------------------
-def extract_items_from_text(text: str) -> List[Dict[str, Any]]:
-    items: List[Dict[str, Any]] = []
-    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
-
-    for ln in lines:
-        keep = False
-        if REQ_ID_RE.search(ln):
-            keep = True
-        if any(k in ln.lower() for k in ["shall", "must", "required", "offeror", "contractor", "submit", "deadline", "due date", "format", "pdf", "font", "margin"]):
-            keep = True
-
-        if not keep:
-            continue
-
-        req_match = REQ_ID_RE.search(ln)
-        req_id = req_match.group(0).upper() if req_match else ""
-
-        label, conf = classify_gating(ln)
-        bucket = infer_bucket(ln)
-
-        item = ensure_item_shape({
-            "req_id": req_id,
-            "text": ln,
-            "bucket": bucket,
-            "gating_label": label,
-            "confidence": conf,
-            "status": STATUS_UNKNOWN,
+        items.append({
+            "id": f"R{i:03d}",
+            "text": r,
+            "bucket": b,
+            "gating_label": gating_label,
+            "confidence": round(conf, 2),
+            "status": "Unknown" if gating_label == "ACTIONABLE" else "Unknown",
+            "done": done,
             "notes": "",
-            "source": "intake",
         })
-
-        if label == GATING_AUTO:
-            item["status"] = STATUS_PASS
-            item["done"] = True
-
-        items.append(item)
-
     return items
 
-
-# ---------------------------
-# Missing critical fields engine (starter)
-# ---------------------------
-def detect_critical_missing(source_text: str) -> List[Dict[str, Any]]:
-    t = (source_text or "").lower()
-    missing = []
-
-    has_deadline = any(k in t for k in ["offer due", "due date", "deadline", "no later than"])
-    if not has_deadline:
-        missing.append({
-            "req_id": "CRIT-001",
-            "text": "Submission deadline not detected. Enter/confirm the Offer Due Date (from solicitation).",
-            "bucket": "Missing Critical Fields",
-            "gating_label": GATING_ACTIONABLE,
-            "confidence": 0.95,
-        })
-
-    has_method = any(k in t for k in ["submit electronically", "email", "portal", "upload", "sam.gov", "piee"])
-    if not has_method:
-        missing.append({
-            "req_id": "CRIT-002",
-            "text": "Submission method not detected. Confirm how proposals must be submitted (email/portal/upload).",
-            "bucket": "Missing Critical Fields",
-            "gating_label": GATING_ACTIONABLE,
-            "confidence": 0.95,
-        })
-
-    has_format = any(k in t for k in ["pdf", "font", "margin", "page limit", "file format"])
-    if not has_format:
-        missing.append({
-            "req_id": "CRIT-003",
-            "text": "Formatting rules not detected. Confirm file format, font, margin, and page limit requirements.",
-            "bucket": "Missing Critical Fields",
-            "gating_label": GATING_ACTIONABLE,
-            "confidence": 0.95,
-        })
-
-    has_price_sheet = any(k in t for k in ["excel", "spreadsheet", "price sheet", "pricing data"])
-    if has_price_sheet:
-        missing.append({
-            "req_id": "CRIT-004",
-            "text": "Pricing appears to require an editable spreadsheet (Excel). Prepare the required price sheet format.",
-            "bucket": "Volume III – Price/Cost",
-            "gating_label": GATING_ACTIONABLE,
-            "confidence": 0.85,
-        })
-
-    return [ensure_item_shape(m) for m in missing]
-
-
-# ---------------------------
+# -----------------------------
 # KPI + Gate logic
-# ---------------------------
-def compute_kpis(items: List[Dict[str, Any]]) -> Dict[str, Any]:
-    actionable = [i for i in items if i.get("gating_label") == GATING_ACTIONABLE]
-    total = len(actionable)
-    pass_ct = sum(1 for i in actionable if i.get("status") == STATUS_PASS)
-    fail_ct = sum(1 for i in actionable if i.get("status") == STATUS_FAIL)
-    unk_ct = sum(1 for i in actionable if i.get("status") == STATUS_UNKNOWN)
-    done_ct = sum(1 for i in actionable if i.get("status") in (STATUS_PASS, STATUS_FAIL))
-    completion = (done_ct / total) if total else 0.0
-    return {
-        "total_actionable": total,
-        "pass": pass_ct,
-        "fail": fail_ct,
-        "unknown": unk_ct,
-        "done": done_ct,
-        "completion": completion,
-    }
+# -----------------------------
+def actionable_items(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [x for x in state["items"] if x["gating_label"] == "ACTIONABLE"]
 
+def counts(state: Dict[str, Any]) -> Dict[str, int]:
+    a = actionable_items(state)
+    pass_ct = sum(1 for x in a if x["status"] == "Pass")
+    fail_ct = sum(1 for x in a if x["status"] == "Fail")
+    unk_ct = sum(1 for x in a if x["status"] == "Unknown")
+    done_ct = sum(1 for x in a if x.get("done"))
+    total = len(a)
+    return {"pass": pass_ct, "fail": fail_ct, "unknown": unk_ct, "done": done_ct, "total": total}
 
-def gate_status(kpis: Dict[str, Any], max_unknown: int, max_fail: int) -> str:
-    if kpis["fail"] > max_fail:
-        return "FAIL"
-    if kpis["unknown"] > max_unknown:
+def completion_pct(state: Dict[str, Any]) -> float:
+    c = counts(state)
+    if c["total"] == 0:
+        return 0.0
+    # completion means: actionable items moved off Unknown OR manually checked done
+    completed = sum(1 for x in actionable_items(state) if (x["status"] != "Unknown") or x.get("done"))
+    return round(100.0 * completed / c["total"], 1)
+
+def gate_status(state: Dict[str, Any]) -> str:
+    c = counts(state)
+    if c["total"] == 0:
+        return "GATE NOT RUN"
+    # strict rules:
+    # - Fail must be 0
+    # - Unknown must be <= 2
+    # - Completion must be >= 90%
+    pct = completion_pct(state)
+    if c["fail"] == 0 and c["unknown"] <= 2 and pct >= 90:
+        return "PASS"
+    if c["fail"] > 0:
         return "AT RISK"
-    return "PASS"
+    if c["unknown"] > 2:
+        return "AT RISK"
+    return "AT RISK"
 
+def kpi_chip_class_for_gate(g: str) -> str:
+    if g == "PASS":
+        return "green"
+    if g == "AT RISK":
+        return "yellow"
+    return "gray"
 
-def chip_style(color: str) -> str:
-    styles = {
-        "green": "background:#e8f7ee;color:#136f3a;border:1px solid #bde5c9;",
-        "yellow": "background:#fff7e6;color:#8a5a00;border:1px solid #ffe0a3;",
-        "red": "background:#fdeaea;color:#9b1c1c;border:1px solid #f7b7b7;",
-        "blue": "background:#e8f0fe;color:#1a3d8f;border:1px solid #bcd0ff;",
-        "gray": "background:#f3f4f6;color:#374151;border:1px solid #e5e7eb;",
-    }
-    return styles.get(color, styles["gray"])
+def chip_class_for_unknown(unk: int) -> str:
+    if unk == 0:
+        return "green"
+    if unk <= 2:
+        return "yellow"
+    return "red"
 
+def chip_class_for_fail(f: int) -> str:
+    if f == 0:
+        return "green"
+    return "red"
 
-def render_chip(text: str, color: str):
+# -----------------------------
+# Missing Critical Fields Engine (v1)
+# -----------------------------
+CRITICAL_FIELDS = [
+    ("Due date", lambda s: bool(s["intake"]["due_date"].strip())),
+    ("Submission method", lambda s: bool(s["intake"]["submission_method"].strip())),
+    ("Submission destination (email/portal)", lambda s: bool(s["intake"]["submission_destination"].strip())),
+    ("Company name", lambda s: bool(s["company"]["name"].strip())),
+    ("POC email", lambda s: bool(s["company"]["poc_email"].strip())),
+]
+
+def ensure_critical_field_tasks(state: Dict[str, Any]):
+    """
+    Creates top-priority actionable tasks if critical intake/company fields missing.
+    De-dupes by stable IDs.
+    """
+    existing_ids = set(x["id"] for x in state["items"])
+    idx = 900  # critical tasks use R900+
+    for label, ok_fn in CRITICAL_FIELDS:
+        if not ok_fn(state):
+            tid = f"R{idx}"
+            if tid not in existing_ids:
+                state["items"].insert(0, {
+                    "id": tid,
+                    "text": f"Add missing critical field: {label}",
+                    "bucket": "Submission & Format" if "Submission" in label or "Due" in label else "Required Forms",
+                    "gating_label": "ACTIONABLE",
+                    "confidence": 0.95,
+                    "status": "Unknown",
+                    "done": False,
+                    "notes": "",
+                })
+            idx += 1
+
+# -----------------------------
+# Export
+# -----------------------------
+def export_checklist_pdf(state: Dict[str, Any]) -> bytes:
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(50, height - 50, f"{APP_NAME} — Submission Checklist")
+    c.setFont("Helvetica", 10)
+    c.drawString(50, height - 70, f"Run ID: {state['run_id']}   Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
+    y = height - 100
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(50, y, "Actionable Tasks")
+    y -= 18
+    c.setFont("Helvetica", 10)
+
+    for item in actionable_items(state):
+        line = f"[{'X' if item.get('done') or item['status'] != 'Unknown' else ' '}] {item['id']} ({item['bucket']}) — {item['text']}"
+        if len(line) > 120:
+            line = line[:117] + "..."
+        c.drawString(50, y, line)
+        y -= 14
+        if y < 60:
+            c.showPage()
+            y = height - 60
+            c.setFont("Helvetica", 10)
+
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+def export_compliance_matrix_df(state: Dict[str, Any]) -> pd.DataFrame:
+    rows = []
+    for x in state["items"]:
+        rows.append({
+            "id": x["id"],
+            "bucket": x["bucket"],
+            "gating_label": x["gating_label"],
+            "confidence": x["confidence"],
+            "status": x["status"],
+            "done": x.get("done", False),
+            "text": x["text"],
+            "notes": x.get("notes", ""),
+        })
+    return pd.DataFrame(rows)
+
+# -----------------------------
+# UX Helpers
+# -----------------------------
+def hero(state: Dict[str, Any]):
+    c = counts(state)
+    pct = completion_pct(state)
+    gate = state["gate"]["status"]
+
     st.markdown(
         f"""
-        <div style="
-            display:inline-block;
-            padding:10px 14px;
-            border-radius:999px;
-            font-weight:700;
-            margin:6px 0;
-            {chip_style(color)}
-        ">{text}</div>
+        <div class="path-hero">
+          <div class="path-brand">
+            <div>
+              <div class="path-title">{APP_NAME}</div>
+              <div class="path-sub">A calm, guided path to a compliant proposal — only what matters, when it matters.</div>
+            </div>
+            <div class="path-meta">{APP_VERSION} • {APP_DATE}</div>
+          </div>
+        </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
+    # progress bar
+    st.progress(pct / 100.0)
 
-def clean_ui_text(s: str) -> str:
-    s = (s or "").strip()
-    s = re.sub(r"^\s*attachment mention:\s*", "", s, flags=re.IGNORECASE)
-    return s.strip()
+    # chips
+    fail_ct = c["fail"]
+    unk_ct = c["unknown"]
+    total = c["total"]
+    pass_ct = c["pass"]
 
+    gate_class = kpi_chip_class_for_gate(gate)
+    fail_class = chip_class_for_fail(fail_ct)
+    unk_class = chip_class_for_unknown(unk_ct)
 
-# ---------------------------
-# Helpers
-# ---------------------------
-def get_or_create_run_id() -> str:
-    qp = st.query_params
-    run_id = qp.get("run", "")
-    if run_id:
-        return run_id
-    new_id = str(uuid.uuid4())
-    st.query_params["run"] = new_id
-    return new_id
+    st.markdown(
+        f"""
+        <div class="chips">
+          <div class="chip blue">Completion: {pct}%</div>
+          <div class="chip green">Pass: {pass_ct}</div>
+          <div class="chip {fail_class}">Fail: {fail_ct}</div>
+          <div class="chip {unk_class}">Unknown: {unk_ct}</div>
+          <div class="chip {gate_class}">Gate: {gate}</div>
+          <div class="chip gray">Actionable: {total}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
+def locked_message(need: str):
+    st.info(f"🔒 Not yet. Complete **{need}** first — then this step unlocks automatically.")
 
-def load_state(run_id: str) -> Dict[str, Any]:
-    loaded = db_load_run(run_id)
-    if loaded:
-        return loaded
-    return new_empty_state()
+def intake_complete(state: Dict[str, Any]) -> bool:
+    return bool(state["intake"]["raw_text"].strip())
 
+def company_complete(state: Dict[str, Any]) -> bool:
+    # minimal: company name + POC email
+    return bool(state["company"]["name"].strip()) and bool(state["company"]["poc_email"].strip())
 
-def save_state(run_id: str, state: Dict[str, Any]):
-    db_save_run(run_id, state, name=state.get("run_name") or "")
+def compliance_ready(state: Dict[str, Any]) -> bool:
+    return len(state["items"]) > 0
 
+def draft_ready(state: Dict[str, Any]) -> bool:
+    # gate pass OR at least 70% completion
+    return completion_pct(state) >= 70
 
-def upsert_items(state: Dict[str, Any], new_items: List[Dict[str, Any]]) -> None:
-    existing = state.get("items", [])
-    seen = set((i.get("req_id",""), i.get("text","")) for i in existing)
+def export_ready(state: Dict[str, Any]) -> bool:
+    return state["gate"]["status"] in ["PASS", "AT RISK"] and completion_pct(state) >= 70
 
-    for ni in new_items:
-        key = (ni.get("req_id",""), ni.get("text",""))
-        if key in seen:
+# -----------------------------
+# Pages
+# -----------------------------
+def page_task_list(state: Dict[str, Any]):
+    st.markdown('<div class="h2">Task List</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subtle">Only tasks that matter show here. Everything else is quietly handled in the background.</div>', unsafe_allow_html=True)
+
+    if not intake_complete(state):
+        st.warning("No tasks yet. Start in **Intake** and paste your solicitation text to generate tasks.")
+        return
+
+    ensure_critical_field_tasks(state)
+
+    tasks = actionable_items(state)
+    if not tasks:
+        st.success("Nice — nothing actionable right now.")
+        return
+
+    # Smart grouping
+    grouped = {b: [] for b in BUCKETS}
+    for t in tasks:
+        grouped.get(t["bucket"], grouped["Other"]).append(t)
+
+    for b in BUCKETS:
+        if not grouped[b]:
             continue
-        existing.append(ensure_item_shape(ni))
-        seen.add(key)
+        with st.expander(f"{b} ({len(grouped[b])})", expanded=(b in ["Submission & Format", "Required Forms"])):
+            for item in grouped[b]:
+                render_actionable_item(item, state)
 
-    state["items"] = existing
+    # Reference Drawer
+    render_reference_drawer(state)
 
+def render_actionable_item(item: Dict[str, Any], state: Dict[str, Any]):
+    tid = item["id"]
 
-def apply_relevance_gating(state: Dict[str, Any]) -> None:
-    items = []
-    for it in state.get("items", []):
-        it = ensure_item_shape(it)
-        if not it.get("gating_label"):
-            label, conf = classify_gating(it.get("text",""))
-            it["gating_label"] = label
-            it["confidence"] = conf
-        if not it.get("bucket"):
-            it["bucket"] = infer_bucket(it.get("text",""))
+    st.markdown('<div class="task">', unsafe_allow_html=True)
+    top = st.columns([0.15, 0.65, 0.20], vertical_alignment="top")
+    with top[0]:
+        done_key = f"done_{tid}"
+        if done_key not in st.session_state:
+            st.session_state[done_key] = bool(item.get("done", False))
+        st.session_state[done_key] = st.checkbox("Done", value=st.session_state[done_key], key=done_key, label_visibility="collapsed")
+        item["done"] = st.session_state[done_key]
 
-        if it["gating_label"] == GATING_AUTO:
-            it["status"] = STATUS_PASS
-            it["done"] = True
-        if it["gating_label"] == GATING_ACTIONABLE:
-            it["done"] = it["status"] in (STATUS_PASS, STATUS_FAIL)
+    with top[1]:
+        st.markdown(f"**{tid}**  <span class='badge'>{item['bucket']}</span>", unsafe_allow_html=True)
+        st.write(item["text"])
+        st.caption(f"Confidence: {item['confidence']} • Label: {item['gating_label']}")
 
-        items.append(it)
-    state["items"] = items
+    with top[2]:
+        status_key = f"status_{tid}"
+        if status_key not in st.session_state:
+            st.session_state[status_key] = item.get("status", "Unknown")
+        st.session_state[status_key] = st.selectbox("Status", STATUS, index=STATUS.index(st.session_state[status_key]), key=status_key)
+        item["status"] = st.session_state[status_key]
 
+    notes_key = f"notes_{tid}"
+    if notes_key not in st.session_state:
+        st.session_state[notes_key] = item.get("notes", "")
+    st.session_state[notes_key] = st.text_input("Notes (optional)", value=st.session_state[notes_key], key=notes_key, placeholder="Add a quick note if needed…")
+    item["notes"] = st.session_state[notes_key]
+    st.markdown("</div>", unsafe_allow_html=True)
 
-def page_ready(state: Dict[str, Any], page: str) -> bool:
-    """
-    "Lock the new flow" rule:
-    You can still click tabs, but we show a clear block if prerequisites aren't done.
-    """
-    kpis = compute_kpis(state.get("items", []))
-    if page == "Task List":
-        return True
-    if page == "Intake":
-        return True
-    if page == "Company":
-        return bool(state.get("intake", {}).get("source_text", "").strip())
-    if page == "Compliance":
-        return bool(state.get("intake", {}).get("source_text", "").strip())
-    if page == "Draft":
-        return kpis["total_actionable"] > 0
-    if page == "Export":
-        return state.get("gate", {}).get("status") in ("PASS", "AT RISK")
-    return True
+def render_reference_drawer(state: Dict[str, Any]):
+    info_items = [x for x in state["items"] if x["gating_label"] == "INFORMATIONAL"]
+    if not info_items:
+        return
 
+    with st.expander(f"Reference (optional) • {len(info_items)} items", expanded=False):
+        st.markdown('<div class="subtle">This is supporting information. It’s here if you need it — otherwise ignore it.</div>', unsafe_allow_html=True)
+        q = st.text_input("Search reference", value="", placeholder="Search by keyword…")
+        filt_bucket = st.selectbox("Filter by section", ["All"] + BUCKETS, index=0)
 
-# ---------------------------
-# App UI
-# ---------------------------
-st.set_page_config(page_title="Path", layout="centered")
+        shown = info_items
+        if q.strip():
+            shown = [x for x in shown if q.lower() in x["text"].lower()]
+        if filt_bucket != "All":
+            shown = [x for x in shown if x["bucket"] == filt_bucket]
 
-run_id = get_or_create_run_id()
-state = load_state(run_id)
+        for x in shown[:120]:
+            st.write(f"• **{x['id']}** ({x['bucket']}) — {x['text']}")
 
-apply_relevance_gating(state)
-kpis = compute_kpis(state.get("items", []))
+def page_intake(state: Dict[str, Any]):
+    st.markdown('<div class="h2">Intake</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subtle">Paste the solicitation text. Path.ai will extract and organize the work for you.</div>', unsafe_allow_html=True)
 
-# Header
-col1, col2 = st.columns([3, 2])
-with col1:
-    st.markdown("## Path")
-with col2:
-    st.markdown(f"<div style='text-align:right;color:#6b7280;font-weight:700'>{APP_VERSION}</div>", unsafe_allow_html=True)
+    colA, colB = st.columns([0.55, 0.45], vertical_alignment="top")
 
-# Progress bar based on actionable completion
-st.progress(kpis["completion"])
+    with colA:
+        state["intake"]["title"] = st.text_input("Solicitation title (optional)", value=state["intake"]["title"])
+        state["intake"]["agency"] = st.text_input("Agency (optional)", value=state["intake"]["agency"])
+        state["intake"]["rfp_number"] = st.text_input("RFP/RFI number (optional)", value=state["intake"]["rfp_number"])
 
-comp_pct = int(round(kpis["completion"] * 100))
-comp_color = "red" if comp_pct < 40 else ("yellow" if comp_pct < 90 else "green")
-render_chip(f"Completion: {comp_pct}%", comp_color)
-
-render_chip(f"Pass: {kpis['pass']}", "green")
-render_chip(f"Fail: {kpis['fail']}", "red" if kpis["fail"] > 0 else "gray")
-render_chip(f"Unknown: {kpis['unknown']}", "yellow" if kpis["unknown"] > 0 else "green")
-
-gate_txt = state.get("gate", {}).get("status", "GATE NOT RUN")
-gate_color = "gray"
-if gate_txt == "PASS":
-    gate_color = "green"
-elif gate_txt == "AT RISK":
-    gate_color = "yellow"
-elif gate_txt == "FAIL":
-    gate_color = "red"
-render_chip(f"Gate: {gate_txt}", gate_color)
-
-st.divider()
-
-# Horizontal navigation
-tabs = st.tabs(PAGES)
-
-# ---------------------------
-# TAB 0: Task List (Home Screen)
-# ---------------------------
-with tabs[0]:
-    st.markdown("### Task List (Home Screen)")
-    st.caption("Only ACTIONABLE tasks show here. Everything else lives in Reference (collapsed) or is hidden.")
-
-    # Run name
-    state["run_name"] = st.text_input("Run name (optional)", value=state.get("run_name",""), placeholder="Example: DEA BPA – Jan 2026")
-
-    items = state.get("items", [])
-    actionable = [i for i in items if i.get("gating_label") == GATING_ACTIONABLE]
-
-    if not actionable:
-        st.info("No actionable tasks yet. Go to Intake and paste solicitation text to generate items.")
-    else:
-        grouped: Dict[str, List[Dict[str, Any]]] = {b: [] for b in BUCKETS}
-        for a in actionable:
-            b = a.get("bucket") or "Other"
-            grouped.setdefault(b, [])
-            grouped[b].append(a)
-
-        for bucket in BUCKETS:
-            bucket_items = grouped.get(bucket, [])
-            if not bucket_items:
-                continue
-
-            # Show Missing Critical Fields expanded by default
-            default_open = True if bucket == "Missing Critical Fields" else False
-            with st.expander(bucket, expanded=default_open):
-                for it in bucket_items:
-                    it_id = it["id"]
-                    rid = it.get("req_id","") or it_id
-                    text = clean_ui_text(it.get("text",""))
-
-                    st.markdown(f"**{rid}** — {text}")
-                    c1, c2 = st.columns([2, 1])
-
-                    with c1:
-                        new_status = st.selectbox(
-                            "Status",
-                            [STATUS_UNKNOWN, STATUS_PASS, STATUS_FAIL],
-                            index=[STATUS_UNKNOWN, STATUS_PASS, STATUS_FAIL].index(it.get("status", STATUS_UNKNOWN)),
-                            key=f"status_{it_id}",
-                            label_visibility="collapsed",
-                        )
-                        new_notes = st.text_input(
-                            "Notes",
-                            value=it.get("notes",""),
-                            key=f"notes_{it_id}",
-                            label_visibility="collapsed",
-                            placeholder="Optional note (where it’s addressed, page ref, etc.)",
-                        )
-
-                    with c2:
-                        st.markdown(f"<div style='color:#6b7280;font-size:12px;'>Confidence: {int(it.get('confidence',0.5)*100)}%</div>", unsafe_allow_html=True)
-                        st.markdown(f"<div style='color:#6b7280;font-size:12px;'>Bucket: {it.get('bucket','Other')}</div>", unsafe_allow_html=True)
-
-                    # Apply updates
-                    if new_status != it.get("status") or new_notes != it.get("notes"):
-                        it["status"] = new_status
-                        it["notes"] = new_notes
-                        it["done"] = (new_status in (STATUS_PASS, STATUS_FAIL))
-
-                    st.divider()
-
-        # Reference Drawer
-        with st.expander("Reference (Informational content — collapsed by default)", expanded=False):
-            info_items = [i for i in items if i.get("gating_label") == GATING_INFORMATIONAL]
-            q = st.text_input("Search reference", value="", placeholder="Search by keyword…")
-            if q:
-                info_items = [i for i in info_items if q.lower() in (i.get("text","").lower())]
-
-            st.caption(f"{len(info_items)} informational items.")
-            for it in info_items[:300]:
-                rid = it.get("req_id","") or it["id"]
-                st.markdown(f"**{rid}** — {clean_ui_text(it.get('text',''))}")
-
-    save_state(run_id, state)
-
-# ---------------------------
-# TAB 1: Intake
-# ---------------------------
-with tabs[1]:
-    st.markdown("### Intake")
-    st.caption("Paste solicitation text. Items are generated and relevance-gated automatically.")
-
-    runs = db_list_runs(limit=25)
-    if runs:
-        with st.expander("Load an existing run", expanded=False):
-            opts = [f"{name} — {updated} — {rid}" for rid, name, updated in runs]
-            chosen = st.selectbox("Recent runs", opts, index=0)
-            if st.button("Load selected run"):
-                rid = chosen.split(" — ")[-1].strip()
-                st.query_params["run"] = rid
-                st.rerun()
-
-    state["intake"]["source_text"] = st.text_area(
-        "Solicitation Text",
-        value=state["intake"].get("source_text",""),
-        height=240,
-        placeholder="Paste the solicitation/RFP text here…"
-    )
-    state["intake"]["notes"] = st.text_area(
-        "Notes (optional)",
-        value=state["intake"].get("notes",""),
-        height=90,
-        placeholder="Optional notes (scope, NAICS, special constraints)…"
-    )
-
-    cA, cB, cC = st.columns([1, 1, 1])
-    with cA:
-        if st.button("Generate / Refresh Items", use_container_width=True):
-            src = state["intake"].get("source_text","")
-            extracted = extract_items_from_text(src)
-            crit = detect_critical_missing(src)
-
-            upsert_items(state, extracted)
-            upsert_items(state, crit)
-
-            apply_relevance_gating(state)
-            save_state(run_id, state)
-            st.success("Items updated. Go to Task List to complete actionable tasks.")
-            st.rerun()
-
-    with cB:
-        if st.button("Re-run Relevance Gating", use_container_width=True):
-            apply_relevance_gating(state)
-            save_state(run_id, state)
-            st.success("Gating refreshed.")
-            st.rerun()
-
-    with cC:
-        if st.button("Reset Items (danger)", use_container_width=True):
-            state["items"] = []
-            state["gate"]["status"] = "GATE NOT RUN"
-            state["gate"]["last_run_at"] = None
-            save_state(run_id, state)
-            st.warning("Items cleared. Paste text and regenerate.")
-            st.rerun()
-
-# ---------------------------
-# TAB 2: Company
-# ---------------------------
-with tabs[2]:
-    st.markdown("### Company")
-    if not page_ready(state, "Company"):
-        st.warning("Complete Intake first (paste solicitation text) so the app can determine what’s relevant.")
-    else:
-        st.caption("Basic company info (used later for draft + export).")
-        c1, c2 = st.columns(2)
-        with c1:
-            state["company"]["company_name"] = st.text_input("Company Name", value=state["company"].get("company_name",""))
-            state["company"]["uei"] = st.text_input("UEI", value=state["company"].get("uei",""))
-            state["company"]["cage"] = st.text_input("CAGE", value=state["company"].get("cage",""))
-        with c2:
-            state["company"]["email"] = st.text_input("Email", value=state["company"].get("email",""))
-            state["company"]["phone"] = st.text_input("Phone", value=state["company"].get("phone",""))
-            state["company"]["address"] = st.text_area("Address", value=state["company"].get("address",""), height=100)
-
-        st.info("Next: go to Task List and start completing ACTIONABLE items.")
-        save_state(run_id, state)
-
-# ---------------------------
-# TAB 3: Compliance
-# ---------------------------
-with tabs[3]:
-    st.markdown("### Compliance")
-    if not page_ready(state, "Compliance"):
-        st.warning("Complete Intake first (paste solicitation text) to generate actionable compliance tasks.")
-    else:
-        st.caption("Compliance is driven ONLY by ACTIONABLE items (Pass/Fail/Unknown).")
-
-        # Gate rules
-        st.subheader("Gate Rules")
-        r1, r2 = st.columns(2)
-        with r1:
-            state["gate"]["rules"]["max_unknown"] = st.number_input(
-                "Max Unknown allowed",
-                min_value=0,
-                max_value=9999,
-                value=int(state["gate"]["rules"].get("max_unknown", 0)),
-            )
-        with r2:
-            state["gate"]["rules"]["max_fail"] = st.number_input(
-                "Max Fail allowed",
-                min_value=0,
-                max_value=9999,
-                value=int(state["gate"]["rules"].get("max_fail", 0)),
-            )
-
-        st.subheader("Run Gate Check")
-        if st.button("Run Gate Check", use_container_width=True):
-            apply_relevance_gating(state)
-            kpis_now = compute_kpis(state.get("items", []))
-            status = gate_status(
-                kpis_now,
-                max_unknown=int(state["gate"]["rules"]["max_unknown"]),
-                max_fail=int(state["gate"]["rules"]["max_fail"]),
-            )
-            state["gate"]["status"] = status
-            state["gate"]["last_run_at"] = datetime.now(timezone.utc).isoformat()
-            save_state(run_id, state)
-            st.success(f"Gate result: {status}")
-            st.rerun()
-
-        st.divider()
-        st.subheader("Actionable Summary")
-        k = compute_kpis(state.get("items", []))
-        st.write(f"- Actionable total: **{k['total_actionable']}**")
-        st.write(f"- Pass: **{k['pass']}**")
-        st.write(f"- Fail: **{k['fail']}**")
-        st.write(f"- Unknown: **{k['unknown']}**")
-        st.write(f"- Completion: **{int(round(k['completion']*100))}%**")
-
-        save_state(run_id, state)
-
-# ---------------------------
-# TAB 4: Draft
-# ---------------------------
-with tabs[4]:
-    st.markdown("### Draft")
-    if not page_ready(state, "Draft"):
-        st.warning("Generate actionable tasks first (Intake → Generate).")
-    else:
-        st.caption("This is a starter draft area. Later we’ll add AI to generate a proposal draft from tasks + company info.")
-
-        # Simple draft outline generator (non-AI placeholder)
-        if st.button("Generate Draft Outline (starter)", use_container_width=True):
-            actionable = [i for i in state.get("items", []) if i.get("gating_label") == GATING_ACTIONABLE]
-            grouped: Dict[str, List[Dict[str, Any]]] = {}
-            for a in actionable:
-                grouped.setdefault(a.get("bucket","Other"), [])
-                grouped[a.get("bucket","Other")].append(a)
-
-            outline_lines = []
-            outline_lines.append(f"Proposal Draft Outline — {state.get('company',{}).get('company_name','[Company]')}")
-            outline_lines.append("")
-            for bucket in BUCKETS:
-                if bucket not in grouped:
-                    continue
-                outline_lines.append(f"## {bucket}")
-                for it in grouped[bucket]:
-                    rid = it.get("req_id","") or it["id"]
-                    outline_lines.append(f"- {rid}: {clean_ui_text(it.get('text',''))}")
-                outline_lines.append("")
-            state["draft"]["outline"] = "\n".join(outline_lines)
-            save_state(run_id, state)
-            st.success("Draft outline created.")
-            st.rerun()
-
-        state["draft"]["outline"] = st.text_area(
-            "Draft Outline",
-            value=state["draft"].get("outline",""),
+        state["intake"]["raw_text"] = st.text_area(
+            "Paste solicitation text",
+            value=state["intake"]["raw_text"],
             height=260,
-        )
-        state["draft"]["notes"] = st.text_area(
-            "Draft Notes",
-            value=state["draft"].get("notes",""),
-            height=120,
-            placeholder="Add notes for later AI generation (tone, win themes, past performance, etc.)",
+            placeholder="Paste the RFP/RFI/SOW text here…",
         )
 
-        save_state(run_id, state)
+        st.markdown("<div class='big-btn'>", unsafe_allow_html=True)
+        if st.button("Generate my tasks", use_container_width=True):
+            raw = state["intake"]["raw_text"].strip()
+            if not raw:
+                st.error("Paste the solicitation text first.")
+            else:
+                reqs = split_requirements(raw)
+                state["items"] = build_items(reqs)
+                ensure_critical_field_tasks(state)
+                state["gate"]["status"] = "GATE NOT RUN"
+                state["gate"]["last_run_at"] = None
+                save_state()
+                st.success(f"Generated {len(state['items'])} items. Go to Task List to work through the important ones.")
 
-# ---------------------------
-# TAB 5: Export
-# ---------------------------
-with tabs[5]:
-    st.markdown("### Export")
-    if not page_ready(state, "Export"):
-        st.warning("Run Gate Check first (Compliance tab). Export is locked until Gate is PASS or AT RISK.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with colB:
+        st.markdown("**Detected submission details (fill what you can):**")
+        state["intake"]["due_date"] = st.text_input("Due date", value=state["intake"]["due_date"], placeholder="Example: 2026-02-14 14:00 ET")
+        state["intake"]["submission_method"] = st.text_input("Submission method", value=state["intake"]["submission_method"], placeholder="Email / Portal / eOffer / etc.")
+        state["intake"]["submission_destination"] = st.text_input("Submission destination", value=state["intake"]["submission_destination"], placeholder="Email address or portal URL")
+        state["intake"]["format_rules"] = st.text_area("Format rules (optional)", value=state["intake"]["format_rules"], height=110, placeholder="Fonts, margins, file naming, page limits…")
+
+        st.markdown("<hr class='soft'/>", unsafe_allow_html=True)
+        st.markdown("**Save / Load your run**")
+        run_json = json.dumps(state, indent=2)
+
+        st.download_button("Download run state (JSON)", data=run_json, file_name=f"pathai_run_{state['run_id']}.json", mime="application/json")
+
+        up = st.file_uploader("Upload run state (JSON)", type=["json"])
+        if up is not None:
+            try:
+                loaded = json.load(up)
+                st.session_state.state = loaded
+                st.success("Loaded. Your run is back.")
+            except Exception:
+                st.error("That JSON file couldn’t be loaded.")
+
+    save_state()
+
+def page_company(state: Dict[str, Any]):
+    st.markdown('<div class="h2">Company</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subtle">These details make exports and checklists cleaner. Add the basics — you can refine later.</div>', unsafe_allow_html=True)
+
+    cols = st.columns(2, vertical_alignment="top")
+    with cols[0]:
+        state["company"]["name"] = st.text_input("Company name", value=state["company"]["name"])
+        state["company"]["uei"] = st.text_input("UEI (optional)", value=state["company"]["uei"])
+        state["company"]["cage"] = st.text_input("CAGE (optional)", value=state["company"]["cage"])
+        state["company"]["naics"] = st.text_input("NAICS (optional)", value=state["company"]["naics"])
+        state["company"]["address"] = st.text_area("Address (optional)", value=state["company"]["address"], height=90)
+
+    with cols[1]:
+        state["company"]["poc_name"] = st.text_input("Point of contact (name)", value=state["company"]["poc_name"])
+        state["company"]["poc_email"] = st.text_input("Point of contact (email)", value=state["company"]["poc_email"])
+        state["company"]["poc_phone"] = st.text_input("Point of contact (phone)", value=state["company"]["poc_phone"])
+
+    if intake_complete(state):
+        ensure_critical_field_tasks(state)
+
+    save_state()
+
+def page_compliance(state: Dict[str, Any]):
+    st.markdown('<div class="h2">Compliance</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subtle">Mark each actionable task Pass/Fail/Unknown. This powers Gate + Export.</div>', unsafe_allow_html=True)
+
+    tasks = actionable_items(state)
+    if not tasks:
+        st.info("No actionable items yet. Go to Intake and generate tasks.")
+        return
+
+    # Quick filter
+    col1, col2, col3 = st.columns([0.33, 0.33, 0.34])
+    with col1:
+        bucket = st.selectbox("Filter by section", ["All"] + BUCKETS, index=0)
+    with col2:
+        status = st.selectbox("Filter by status", ["All"] + STATUS, index=0)
+    with col3:
+        min_conf = st.slider("Min confidence", 0.0, 1.0, 0.0, 0.05)
+
+    filtered = tasks
+    if bucket != "All":
+        filtered = [x for x in filtered if x["bucket"] == bucket]
+    if status != "All":
+        filtered = [x for x in filtered if x["status"] == status]
+    filtered = [x for x in filtered if x["confidence"] >= min_conf]
+
+    st.markdown("<hr class='soft'/>", unsafe_allow_html=True)
+    for x in filtered[:200]:
+        render_actionable_item(x, state)
+
+    st.markdown("<hr class='soft'/>", unsafe_allow_html=True)
+    st.markdown("<div class='big-btn'>", unsafe_allow_html=True)
+    if st.button("Run Gate Check", use_container_width=True):
+        state["gate"]["status"] = gate_status(state)
+        state["gate"]["last_run_at"] = now_iso()
+        save_state()
+        if state["gate"]["status"] == "PASS":
+            st.success("Gate: PASS — you’re in a strong position to submit.")
+        else:
+            st.warning("Gate: AT RISK — reduce Unknown items and eliminate any Fail.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+def page_draft(state: Dict[str, Any]):
+    st.markdown('<div class="h2">Draft</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subtle">This is where we generate a clean outline + proposal skeleton. (Next upgrade: AI drafting.)</div>', unsafe_allow_html=True)
+
+    st.info("Draft generation is staged next. This version focuses on gating + tasks + compliance + export.")
+    st.markdown("**What’s next here:**")
+    st.write("• One-click proposal outline (by volumes)")
+    st.write("• Auto-filled cover sheet basics")
+    st.write("• Draft sections based on your inputs")
+
+def page_export(state: Dict[str, Any]):
+    st.markdown('<div class="h2">Export</div>', unsafe_allow_html=True)
+    st.markdown('<div class="subtle">Generate your submission checklist and compliance matrix. Only relevant items are included.</div>', unsafe_allow_html=True)
+
+    df = export_compliance_matrix_df(state)
+
+    colA, colB = st.columns(2, vertical_alignment="top")
+
+    with colA:
+        st.markdown("**Submission Checklist (PDF)**")
+        pdf_bytes = export_checklist_pdf(state)
+        st.download_button("Download Checklist PDF", data=pdf_bytes, file_name=f"pathai_checklist_{state['run_id']}.pdf", mime="application/pdf")
+
+    with colB:
+        st.markdown("**Compliance Matrix (CSV / XLSX)**")
+        csv = df.to_csv(index=False).encode("utf-8")
+        st.download_button("Download CSV", data=csv, file_name=f"pathai_matrix_{state['run_id']}.csv", mime="text/csv")
+
+        xlsx_buf = BytesIO()
+        with pd.ExcelWriter(xlsx_buf, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Matrix")
+        st.download_button("Download XLSX", data=xlsx_buf.getvalue(), file_name=f"pathai_matrix_{state['run_id']}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    st.markdown("<hr class='soft'/>", unsafe_allow_html=True)
+    st.dataframe(df, use_container_width=True)
+
+# -----------------------------
+# App
+# -----------------------------
+state = get_state()
+
+# Always keep critical tasks up-to-date once items exist
+if intake_complete(state):
+    ensure_critical_field_tasks(state)
+
+hero(state)
+
+tabs = st.tabs(["Task List", "Intake", "Company", "Compliance", "Draft", "Export"])
+
+# Tab 0: Home tasks (always available)
+with tabs[0]:
+    page_task_list(state)
+
+# Tab 1: Intake (always available)
+with tabs[1]:
+    page_intake(state)
+
+# Tab 2: Company (locked until intake)
+with tabs[2]:
+    if not intake_complete(state):
+        locked_message("Intake")
     else:
-        st.caption("Export should only include what’s relevant. (PDF/CSV package generator will be expanded next.)")
+        page_company(state)
 
-        k = compute_kpis(state.get("items", []))
-        st.info(f"Gate: {state.get('gate',{}).get('status','GATE NOT RUN')} • Completion: {int(round(k['completion']*100))}%")
+# Tab 3: Compliance (locked until intake + items)
+with tabs[3]:
+    if not intake_complete(state):
+        locked_message("Intake")
+    elif not compliance_ready(state):
+        locked_message("Task generation (Intake → Generate my tasks)")
+    else:
+        page_compliance(state)
 
-        # Minimal CSV export of actionable items
-        import pandas as pd
+# Tab 4: Draft (locked until minimum progress)
+with tabs[4]:
+    if not intake_complete(state):
+        locked_message("Intake")
+    elif completion_pct(state) < 70:
+        locked_message("more task completion (aim for 70%+)")
+    else:
+        page_draft(state)
 
-        actionable = [i for i in state.get("items", []) if i.get("gating_label") == GATING_ACTIONABLE]
-        df = pd.DataFrame([{
-            "Req ID": (i.get("req_id") or i.get("id")),
-            "Bucket": i.get("bucket",""),
-            "Requirement": clean_ui_text(i.get("text","")),
-            "Status": i.get("status",""),
-            "Notes": i.get("notes",""),
-            "Confidence": i.get("confidence",0.0),
-        } for i in actionable])
+# Tab 5: Export (locked until progress)
+with tabs[5]:
+    if not intake_complete(state):
+        locked_message("Intake")
+    elif completion_pct(state) < 70:
+        locked_message("more task completion (aim for 70%+)")
+    else:
+        page_export(state)
 
-        st.subheader("Compliance Matrix (Actionable only)")
-        st.dataframe(df, use_container_width=True, hide_index=True)
-
-        csv_bytes = df.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "Download Compliance Matrix (CSV)",
-            data=csv_bytes,
-            file_name="compliance_matrix_actionable.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
-
-        # Save export timestamp
-        if st.button("Mark Export Generated", use_container_width=True):
-            state["export"]["last_export_at"] = datetime.now(timezone.utc).isoformat()
-            save_state(run_id, state)
-            st.success("Export marked.")
-            st.rerun()
-
-        save_state(run_id, state)
-
-# Final save
-save_state(run_id, state)
+save_state()
