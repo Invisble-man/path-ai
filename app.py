@@ -1,6 +1,7 @@
 import io
 import json
 import re
+import base64
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Tuple, Optional, Any
 
@@ -8,7 +9,7 @@ import streamlit as st
 from pypdf import PdfReader
 import docx  # python-docx
 
-from docx.shared import Inches
+from docx.shared import Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -18,11 +19,11 @@ from docx.oxml.ns import qn
 # =========================
 st.set_page_config(page_title="Path – Federal Proposal Generator", layout="wide")
 
-BUILD_VERSION = "v0.9.0"
+BUILD_VERSION = "v0.10.1"
 BUILD_DATE = "Jan 9, 2026"
 
 # =========================
-# UI Styling (makes it look like a website)
+# UI Styling (website look)
 # =========================
 def inject_css():
     st.markdown(
@@ -75,18 +76,50 @@ def inject_css():
         .small { font-size: 0.86rem; }
         .divider { height: 1px; background: rgba(49,51,63,0.10); margin: 10px 0; }
 
-        /* Section headers spacing */
-        .section-head { margin-top: 4px; }
+        /* Website-style notices (replaces st.info blue boxes) */
+        .notice {
+            border-radius: 14px;
+            padding: 12px 14px;
+            border: 1px solid rgba(49,51,63,0.15);
+            background: rgba(255,255,255,0.88);
+            margin: 10px 0 12px 0;
+        }
+        .notice-title { font-weight: 700; margin: 0 0 4px 0; font-size: 0.95rem; }
+        .notice-body { margin: 0; font-size: 0.92rem; color: rgba(49,51,63,0.85); }
+        .notice-neutral { background: rgba(52, 73, 94, 0.06); }
+        .notice-good    { background: rgba(46, 204, 113, 0.10); }
+        .notice-warn    { background: rgba(241, 196, 15, 0.12); }
+        .notice-bad     { background: rgba(231, 76, 60, 0.12); }
 
         /* Make checkboxes more compact */
         div[data-testid="stCheckbox"] label p { font-size: 0.92rem; }
 
+        /* Tighten expanders */
+        div[data-testid="stExpander"] details summary p { font-size: 0.95rem; }
         </style>
         """,
         unsafe_allow_html=True
     )
 
 inject_css()
+
+def ui_notice(title: str, body: str, tone: str = "neutral"):
+    tone_class = {
+        "neutral": "notice-neutral",
+        "good": "notice-good",
+        "warn": "notice-warn",
+        "bad": "notice-bad",
+    }.get(tone, "notice-neutral")
+
+    st.markdown(
+        f"""
+        <div class="notice {tone_class}">
+            <div class="notice-title">{title}</div>
+            <p class="notice-body">{body}</p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 # =========================
 # Helpers
@@ -215,7 +248,7 @@ SUBMISSION_RULE_PATTERNS = [
     (r"\bpage limit\b|\bnot exceed\s+\d+\s+pages\b|\bpages maximum\b", "Page Limit"),
     (r"\bfont\b|\b12[-\s]?point\b|\b11[-\s]?point\b|\bTimes New Roman\b|\bArial\b|\bCalibri\b", "Font Requirement"),
     (r"\bmargins?\b|\b1 inch\b|\bone inch\b|\b0\.?\d+\s*inch\b|\b1\"\b", "Margin Requirement"),
-    (r"\bdue\b|\bdue date\b|\bdeadline\b|\bno later than\b|\boffers?\s+are\s+due\b", "Due Date/Deadline"),
+    (r"\bdue\b|\bdue date\b|\bdeadline\b|\bno later than\b|\boffers?\s+are\s+due\b|\bproposal\s+is\s+due\b", "Due Date/Deadline"),
     (r"\bsubmit\b|\bsubmission\b|\be-?mail\b|\bemailed\b|\bportal\b|\bupload\b|\bsam\.gov\b|\bebuy\b|\bpiee\b|\bfedconnect\b", "Submission Method"),
     (r"\bfile format\b|\bpdf\b|\bdocx\b|\bexcel\b|\bxlsx\b|\bzip\b|\bencrypt\b|\bpassword\b", "File Format Rules"),
     (r"\bsection\s+l\b|\bsection\s+m\b", "Sections L/M referenced"),
@@ -280,6 +313,67 @@ def detect_submission_rules(text: str) -> Dict[str, List[str]]:
         grouped[k] = unique_keep_order(grouped[k])[:12]
     return grouped
 
+# --- NEW: stronger due date extractor to avoid garbage matches ---
+DATE_PATTERNS = [
+    r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2},\s+\d{4}\b",
+    r"\b\d{1,2}/\d{1,2}/\d{2,4}\b",
+    r"\b\d{4}-\d{2}-\d{2}\b",
+]
+TIME_PATTERNS = [
+    r"\b\d{1,2}:\d{2}\s*(?:am|pm)\b",
+    r"\b\d{1,2}\s*(?:am|pm)\b",
+    r"\b\d{1,2}:\d{2}\b",
+]
+TZ_PATTERNS = [
+    r"\b(?:et|ct|mt|pt|est|edt|cst|cdt|mst|mdt|pst|pdt|utc|zulu)\b",
+]
+
+DUE_KEYWORDS = [
+    "offer due", "offers are due", "proposal due", "proposal is due", "submission due",
+    "deadline", "no later than", "due date", "closing date", "response due"
+]
+
+def refine_due_date_rule(text: str, rules: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    lines = scan_lines(text, max_lines=14000)
+
+    best = None
+    best_score = -1
+
+    for line in lines:
+        low = line.lower()
+
+        # must look like an actual due-date line
+        if not any(k in low for k in DUE_KEYWORDS) and "due" not in low:
+            continue
+
+        # avoid invoice/payment due lines (common false positives in forms)
+        if "invoice" in low or "invoices" in low or "payment" in low:
+            continue
+
+        has_date = any(re.search(p, line, re.IGNORECASE) for p in DATE_PATTERNS)
+        has_time = any(re.search(p, line, re.IGNORECASE) for p in TIME_PATTERNS)
+        has_tz = any(re.search(p, line, re.IGNORECASE) for p in TZ_PATTERNS)
+
+        # scoring
+        score = 0
+        if any(k in low for k in DUE_KEYWORDS): score += 3
+        if "no later than" in low: score += 2
+        if "deadline" in low: score += 2
+        if has_date: score += 4
+        if has_time: score += 2
+        if has_tz: score += 1
+        if "section l" in low or "instructions" in low: score += 1
+        if len(line) > 220: score -= 1  # too long tends to be noisy
+
+        if score > best_score:
+            best_score = score
+            best = line
+
+    if best and best_score >= 6:
+        rules = dict(rules or {})
+        rules["Due Date/Deadline"] = [best]
+    return rules
+
 def detect_amendment_lines(text: str) -> List[str]:
     lines = scan_lines(text)
     hits = [l for l in lines if re.search(AMENDMENT_PATTERN, l, re.IGNORECASE)]
@@ -343,7 +437,7 @@ def detect_required_certifications(text: str) -> List[str]:
 def compliance_warnings(rules: Dict[str, List[str]], forms: List[str], amendments: List[str], separate: List[str]) -> List[str]:
     warnings = []
     if not rules:
-        warnings.append("No submission rules detected. If you pasted partial text, upload the full text-based solicitation.")
+        warnings.append("No clear submission rules detected. If you pasted partial text, upload/paste Section L/M and the cover page.")
     else:
         if "Due Date/Deadline" not in rules:
             warnings.append("Due date/deadline not clearly detected. Verify cover page + Section L.")
@@ -421,7 +515,7 @@ def missing_info_alerts(company: CompanyInfo) -> Tuple[List[str], List[str]]:
     if not company.differentiators.strip():
         recommended.append("Differentiators section is empty (hurts competitiveness).")
     if not company.past_performance.strip():
-        recommended.append("Past performance is blank (app will use capability-based language).")
+        recommended.append("Past performance is blank (draft uses capability-based language).")
 
     if not company.proposal_title.strip():
         recommended.append("Proposal/Contract title is blank (recommended for title page).")
@@ -737,7 +831,6 @@ def build_submission_package_detected(
         if drafts.get("Technical Approach"): items.append("Include: Technical Approach")
         if drafts.get("Management Plan"): items.append("Include: Management Plan")
 
-        # include custom sections that exist
         base = {"Cover Letter","Executive Summary","Technical Approach","Management Plan","Past Performance","Compliance Snapshot"}
         for k in (drafts or {}).keys():
             if k not in base:
@@ -851,7 +944,7 @@ def run_pre_submit_gate(
     return {"status": "READY", "level": "ready", "blocked_reasons": [], "risk_reasons": [], "kpi": kpi}
 
 # =========================
-# Word Export Helpers: TOC + page numbers
+# Word Export Helpers: TOC + page numbers (no blue hyperlinks)
 # =========================
 def add_field(paragraph, field_code: str):
     run = paragraph.add_run()
@@ -885,11 +978,26 @@ def add_page_numbers(doc: docx.Document):
     p.add_run(" of ")
     add_field(p, "NUMPAGES")
 
+def set_word_styles_no_blue_links(doc: docx.Document):
+    """
+    Forces the 'Hyperlink' style to look like normal text (black, not underlined).
+    This also reduces Word's auto-hyperlink 'blue' effect for TOC and any detected links.
+    """
+    try:
+        hl = doc.styles["Hyperlink"]
+        hl.font.color.rgb = RGBColor(0, 0, 0)
+        hl.font.underline = False
+    except Exception:
+        pass
+
 def add_table_of_contents(doc: docx.Document):
     doc.add_page_break()
     doc.add_heading("Table of Contents", level=1)
+
+    # NOTE: removed \h so TOC entries do NOT become hyperlinks (reduces blue link styling).
     p = doc.add_paragraph()
-    add_field(p, r'TOC \o "1-3" \h \z \u')
+    add_field(p, r'TOC \o "1-3" \z \u')
+
     doc.add_page_break()
 
 def add_title_page(doc: docx.Document, company: CompanyInfo, logo_bytes: Optional[bytes]):
@@ -953,6 +1061,10 @@ def build_proposal_docx_bytes(
     submission_pkg: Dict[str, List[str]],
 ) -> bytes:
     doc = docx.Document()
+
+    # Apply style preferences early
+    set_word_styles_no_blue_links(doc)
+
     add_page_numbers(doc)
     add_title_page(doc, company, logo_bytes)
     add_table_of_contents(doc)
@@ -1104,7 +1216,7 @@ def diagnostics_quality(diag: Dict[str, Any]) -> Tuple[str, str]:
     Returns (label, level): level in ["good","warn","bad"]
     """
     if not diag:
-        return ("No diagnostics (text pasted)", "warn")
+        return ("Extraction quality: Unknown (text pasted)", "warn")
     if diag.get("file_type") != "pdf":
         return ("Extraction quality: Good", "good")
     pages = diag.get("pages_total") or 0
@@ -1113,7 +1225,6 @@ def diagnostics_quality(diag: Dict[str, Any]) -> Tuple[str, str]:
     scanned = bool(diag.get("likely_scanned"))
     if scanned:
         return ("Extraction quality: Poor (likely scanned)", "bad")
-    # Good if many pages have text and enough chars
     if pages > 0 and (pages_text / max(1, pages)) >= 0.6 and chars >= 2000:
         return ("Extraction quality: Excellent", "good")
     return ("Extraction quality: OK (verify Section L/M)", "warn")
@@ -1132,7 +1243,7 @@ def render_diagnostics_card(diag: Dict[str, Any]):
         f"""
         <div class="card">
           <h4>Diagnostics</h4>
-          <div class="muted">This helps you understand if the PDF text was actually readable.</div>
+          <div class="muted">Confirms whether the PDF was readable as text.</div>
           <div class="divider"></div>
           <span class="pill {badge_class}">{label}</span>
           <div class="small" style="margin-top:8px;">
@@ -1147,7 +1258,97 @@ def render_diagnostics_card(diag: Dict[str, Any]):
     )
 
     if diag and diag.get("likely_scanned"):
-        st.warning("This PDF looks scanned/image-based. OCR is Tier-3 priority #5 on your roadmap. For now, paste the text if possible.")
+        ui_notice(
+            "Scanned PDF detected",
+            "This file looks image-based. Text extraction may miss requirements. If possible, paste the text or use a text-based version of the solicitation.",
+            tone="warn"
+        )
+
+# =========================
+# Project Save/Load (Full State)
+# =========================
+PROJECT_KEYS = [
+    "rfp_text", "rfp_diag", "rules", "forms", "attachments", "amendments", "separate_submit",
+    "required_certs", "sow_snips", "keywords", "drafts", "company", "logo_bytes",
+    "checklist_done", "matrix_rows", "deadline_ack", "validation_last", "pkg_checks"
+]
+
+def b64_from_bytes(b: Optional[bytes]) -> Optional[str]:
+    if not b:
+        return None
+    return base64.b64encode(b).decode("utf-8")
+
+def bytes_from_b64(s: Optional[str]) -> Optional[bytes]:
+    if not s:
+        return None
+    try:
+        return base64.b64decode(s.encode("utf-8"))
+    except Exception:
+        return None
+
+def export_project_json() -> str:
+    c: CompanyInfo = st.session_state.company
+    payload = {
+        "build": {"version": BUILD_VERSION, "date": BUILD_DATE},
+        "rfp_text": st.session_state.rfp_text,
+        "rfp_diag": st.session_state.rfp_diag,
+        "rules": st.session_state.rules,
+        "forms": st.session_state.forms,
+        "attachments": st.session_state.attachments,
+        "amendments": st.session_state.amendments,
+        "separate_submit": st.session_state.separate_submit,
+        "required_certs": st.session_state.required_certs,
+        "sow_snips": st.session_state.sow_snips,
+        "keywords": st.session_state.keywords,
+        "drafts": st.session_state.drafts,
+        "company": c.to_dict(),
+        "logo_b64": b64_from_bytes(st.session_state.logo_bytes),
+        "checklist_done": st.session_state.checklist_done,
+        "matrix_rows": st.session_state.matrix_rows,
+        "deadline_ack": st.session_state.deadline_ack,
+        "validation_last": st.session_state.validation_last,
+        "pkg_checks": st.session_state.pkg_checks,
+    }
+    return json.dumps(payload, indent=2)
+
+def import_project_json(s: str) -> Tuple[bool, str]:
+    try:
+        payload = json.loads(s)
+        if not isinstance(payload, dict):
+            return False, "Invalid project file."
+
+        st.session_state.rfp_text = payload.get("rfp_text", "") or ""
+        st.session_state.rfp_diag = payload.get("rfp_diag", {}) or {}
+        st.session_state.rules = payload.get("rules", {}) or {}
+        st.session_state.forms = payload.get("forms", []) or []
+        st.session_state.attachments = payload.get("attachments", []) or []
+        st.session_state.amendments = payload.get("amendments", []) or []
+        st.session_state.separate_submit = payload.get("separate_submit", []) or []
+        st.session_state.required_certs = payload.get("required_certs", []) or []
+        st.session_state.sow_snips = payload.get("sow_snips", []) or []
+        st.session_state.keywords = payload.get("keywords", []) or []
+        st.session_state.drafts = payload.get("drafts", {}) or {}
+
+        company_dict = payload.get("company", {}) or {}
+        c = CompanyInfo(certifications=[])
+        for k, v in company_dict.items():
+            if hasattr(c, k):
+                setattr(c, k, v)
+        if c.certifications is None:
+            c.certifications = []
+        st.session_state.company = c
+
+        st.session_state.logo_bytes = bytes_from_b64(payload.get("logo_b64"))
+
+        st.session_state.checklist_done = payload.get("checklist_done", {}) or {}
+        st.session_state.matrix_rows = payload.get("matrix_rows", []) or []
+        st.session_state.deadline_ack = bool(payload.get("deadline_ack", False))
+        st.session_state.validation_last = payload.get("validation_last", None)
+        st.session_state.pkg_checks = payload.get("pkg_checks", {}) or {}
+
+        return True, "Project loaded."
+    except Exception as e:
+        return False, f"Could not load project: {e}"
 
 # =========================
 # Session State Init
@@ -1169,13 +1370,29 @@ if "checklist_done" not in st.session_state: st.session_state.checklist_done = {
 if "matrix_rows" not in st.session_state: st.session_state.matrix_rows = []
 if "deadline_ack" not in st.session_state: st.session_state.deadline_ack = False
 if "validation_last" not in st.session_state: st.session_state.validation_last = None
-if "pkg_checks" not in st.session_state: st.session_state.pkg_checks = {}  # checkbox state for submission package
+if "pkg_checks" not in st.session_state: st.session_state.pkg_checks = {}
 
 # =========================
-# Sidebar Navigation
+# Sidebar Navigation + Project Save/Load
 # =========================
 st.sidebar.title("Path")
 st.sidebar.caption(f"{BUILD_VERSION} • {BUILD_DATE}")
+
+with st.sidebar.expander("Project Save / Load", expanded=False):
+    st.download_button(
+        "Download Project (.json)",
+        data=export_project_json(),
+        file_name="path_project.json",
+        mime="application/json"
+    )
+    up_proj = st.file_uploader("Upload Project (.json)", type=["json"], key="proj_uploader")
+    if up_proj:
+        ok, msg = import_project_json(up_proj.read().decode("utf-8", errors="ignore"))
+        if ok:
+            ui_notice("Project loaded", "Your full session (RFP, matrix, drafts, company info) has been restored.", tone="good")
+        else:
+            ui_notice("Could not load project", msg, tone="bad")
+
 page = st.sidebar.radio("Go to", ["RFP Intake", "Company Info", "Proposal Output"])
 st.sidebar.caption("Flow: Upload/Paste → Analyze → Matrix → Drafts → Gate → Export")
 
@@ -1202,10 +1419,14 @@ if page == "RFP Intake":
                 text = pasted.strip()
 
             if not text.strip():
-                st.error("Please upload a readable file OR paste text.")
+                ui_notice("Input required", "Upload a readable file OR paste text.", tone="bad")
             else:
                 st.session_state.rfp_text = text
-                st.session_state.rules = detect_submission_rules(text)
+
+                rules = detect_submission_rules(text)
+                rules = refine_due_date_rule(text, rules)  # NEW: clean due date
+                st.session_state.rules = rules
+
                 st.session_state.forms = find_forms(text)
                 st.session_state.attachments = find_attachment_lines(text)
                 st.session_state.amendments = detect_amendment_lines(text)
@@ -1228,10 +1449,15 @@ if page == "RFP Intake":
 
                 st.session_state.validation_last = None
                 st.session_state.pkg_checks = {}
-                st.success("Analysis saved. Go to Proposal Output.")
+
+                ui_notice("Analysis saved", "Go to Proposal Output.", tone="good")
 
     with colB:
-        st.info("Tip: If your PDF is scanned, text extraction may be weak until OCR is added (roadmap item #5).")
+        ui_notice(
+            "Tip",
+            "If a PDF is image-based (scanned), text extraction may miss requirements. Use a text-based version or paste the relevant sections.",
+            tone="neutral"
+        )
 
     st.markdown("### Diagnostics Preview")
     render_diagnostics_card(st.session_state.rfp_diag)
@@ -1252,7 +1478,7 @@ elif page == "Company Info":
     logo = st.file_uploader("Upload company logo (PNG/JPG)", type=["png", "jpg", "jpeg"])
     if logo:
         st.session_state.logo_bytes = logo.read()
-        st.success("Logo saved. It will be placed on the title page.")
+        ui_notice("Logo saved", "It will be placed on the title page.", tone="good")
         st.image(st.session_state.logo_bytes, width=180)
 
     st.markdown("---")
@@ -1324,11 +1550,11 @@ elif page == "Company Info":
                     if c.certifications is None:
                         c.certifications = []
                     st.session_state.company = c
-                    st.success("Company profile loaded.")
+                    ui_notice("Company profile loaded", "Fields updated from JSON.", tone="good")
                 else:
-                    st.error("That JSON file isn't a valid company profile.")
+                    ui_notice("Invalid file", "That JSON file isn't a valid company profile.", tone="bad")
             except Exception as e:
-                st.error(f"Could not load JSON: {e}")
+                ui_notice("Could not load JSON", str(e), tone="bad")
 
 # =========================
 # Page 3: Proposal Output
@@ -1337,7 +1563,7 @@ else:
     st.title("3) Proposal Output")
 
     if not st.session_state.rfp_text.strip():
-        st.warning("No RFP saved yet. Go to RFP Intake and click Analyze.")
+        ui_notice("No RFP found", "Go to RFP Intake and click Analyze.", tone="warn")
         st.stop()
 
     rules = st.session_state.rules or {}
@@ -1381,28 +1607,32 @@ else:
         unsafe_allow_html=True
     )
 
-    # A) Diagnostics (Website style)
-    st.markdown("### A) Diagnostics (Looks like a website now)")
+    # A) Diagnostics
+    st.markdown("### A) Diagnostics")
     render_diagnostics_card(diag)
 
     # B) Missing Info Alerts
     st.markdown("### B) Missing Info Alerts")
     if crit:
         for x in crit:
-            st.error(x)
+            ui_notice("Missing critical field", x, tone="bad")
     else:
-        st.success("No critical company-info fields missing.")
+        ui_notice("Critical fields", "No critical company-info fields missing.", tone="good")
 
     if rec:
         for x in rec:
-            st.warning(x)
+            ui_notice("Recommended improvement", x, tone="warn")
 
     if required_certs:
-        st.info("RFP mentions these certification types (starter detection): " + ", ".join(required_certs))
+        ui_notice(
+            "Detected certification mentions",
+            "RFP references: " + ", ".join(required_certs),
+            tone="neutral"
+        )
 
     st.markdown("---")
 
-    # C) Submission Package Checklist (Detected-only) with completion %
+    # C) Submission Package Checklist (Detected-only)
     st.markdown("### C) Submission Package Checklist (Detected-Only)")
     submission_pkg = build_submission_package_detected(
         rfp_text=st.session_state.rfp_text,
@@ -1416,16 +1646,14 @@ else:
     )
 
     if not submission_pkg:
-        st.info("No submission package items detected yet. Upload/paste more Section L/M and click Analyze.")
+        ui_notice("Nothing detected yet", "Upload/paste more of Section L/M and re-run Analyze.", tone="warn")
     else:
-        # completion metrics
         total_items = 0
         checked_items = 0
 
         for bucket, items in submission_pkg.items():
             if not items:
                 continue
-
             with st.expander(bucket, expanded=("Submission Instructions" in bucket)):
                 for it in items:
                     key = f"pkg::{bucket}::{it}"
@@ -1442,7 +1670,7 @@ else:
             f"""
             <div class="card">
               <h4>Submission Package Completion</h4>
-              <div class="muted">This is just your checklist progress (not compliance).</div>
+              <div class="muted">This tracks your checklist progress (not compliance).</div>
               <div class="divider"></div>
               <b>{pct}%</b> complete ({checked_items}/{total_items})
             </div>
@@ -1454,10 +1682,10 @@ else:
 
     # D) Compliance Matrix
     st.markdown("### D) Compliance Matrix v2")
-    st.caption("Map each requirement → proposal section and set Pass/Fail/Unknown. Fail blocks Export after Gate runs.")
+    st.caption("Map each requirement → proposal section and set Pass/Fail/Unknown. Fail blocks Export after the Gate runs.")
 
     if not matrix_rows:
-        st.warning("No requirements extracted yet. Try uploading/pasting Section L/M and re-run Analyze.")
+        ui_notice("No requirements extracted", "Paste or upload Section L/M and re-run Analyze.", tone="warn")
     else:
         section_options = DEFAULT_SECTIONS.copy()
         for kname in (drafts or {}).keys():
@@ -1495,7 +1723,7 @@ else:
                             drafts_local[new_title] = f"{new_title}\n\n[Write your response here.]\n\nRequirement:\n{row['requirement']}\n"
                             st.session_state.drafts = drafts_local
                         row["section"] = new_title
-                        st.success(f"Added section: {new_title}")
+                        ui_notice("Section added", f"Added section: {new_title}", tone="good")
 
         st.session_state.matrix_rows = matrix_rows
 
@@ -1524,19 +1752,19 @@ else:
     vr = st.session_state.validation_last
     if vr:
         if vr["level"] == "blocked":
-            st.error(f"Status: {vr['status']}")
+            ui_notice("Status: NOT COMPLIANT", "Export is blocked until items are resolved.", tone="bad")
             for r in vr["blocked_reasons"]:
                 st.write("•", r)
             if vr["risk_reasons"]:
-                st.warning("Additional risks:")
+                ui_notice("Additional risks", "These do not block export, but should be addressed.", tone="warn")
                 for r in vr["risk_reasons"]:
                     st.write("•", r)
         elif vr["level"] == "risk":
-            st.warning(f"Status: {vr['status']}")
+            ui_notice("Status: AT RISK", "Export is allowed once drafts exist, but risks remain.", tone="warn")
             for r in vr["risk_reasons"]:
                 st.write("•", r)
         else:
-            st.success(f"Status: {vr['status']}")
+            ui_notice("Status: READY", "Gate passed. You can export once drafts are generated.", tone="good")
 
     st.markdown("---")
 
@@ -1552,6 +1780,7 @@ else:
 
     st.markdown("---")
 
+    # G) Forms / Attachments / Amendments
     st.markdown("### G) Forms, Attachments, Amendments (starter)")
     col1, col2 = st.columns(2)
     with col1:
@@ -1578,11 +1807,11 @@ else:
 
     st.markdown("---")
 
-    # H) Warnings + Checklist
+    # H) Warnings + Separate indicators
     st.markdown("### H) Compliance Warnings (starter)")
     warns = compliance_warnings(rules, forms, amendments, separate)
     for w in warns:
-        st.warning(w)
+        ui_notice("Warning", w, tone="warn")
 
     if separate:
         st.markdown("**Separate submission indicators**")
@@ -1591,6 +1820,7 @@ else:
 
     st.markdown("---")
 
+    # I) Compliance Checklist v1
     st.markdown("### I) Compliance Checklist v1")
     checklist_items = build_checklist_items(rules, forms, attachments, amendments, separate, required_certs)
     for idx, it in enumerate(checklist_items):
@@ -1619,7 +1849,7 @@ else:
             attachments=attachments,
             company=c
         )
-        st.success("Draft generated. Expand the sections below.")
+        ui_notice("Draft generated", "Expand sections below to review.", tone="good")
 
     drafts = st.session_state.drafts or {}
     if drafts:
@@ -1627,7 +1857,7 @@ else:
             with st.expander(title, expanded=(title in ["Executive Summary", "Technical Approach"])):
                 st.text_area(label="", value=body, height=260)
     else:
-        st.info("Generate drafts to enable export.")
+        ui_notice("Drafts not generated", "Generate drafts to enable export.", tone="neutral")
 
     st.markdown("---")
 
@@ -1644,7 +1874,7 @@ else:
         block_reason = "Export is disabled until you generate draft sections."
 
     if export_blocked:
-        st.error(block_reason)
+        ui_notice("Export locked", block_reason, tone="bad")
         st.caption("Fix the issues above, run the Gate again, then Export will unlock.")
     else:
         doc_bytes = build_proposal_docx_bytes(
