@@ -2,13 +2,11 @@ import io
 import json
 import re
 from dataclasses import dataclass, asdict
-from typing import List, Dict, Any
+from typing import List, Dict
 
 import streamlit as st
 from pypdf import PdfReader
-
-# DOCX support (optional but you already have python-docx in requirements.txt)
-import docx
+import docx  # python-docx
 
 st.set_page_config(page_title="Path – Federal Proposal Generator", layout="wide")
 
@@ -76,6 +74,7 @@ SUBMISSION_RULE_PATTERNS = [
     (r"\bdue\b|\bdue date\b|\bdeadline\b|\bno later than\b|\boffers?\s+are\s+due\b", "Due Date/Deadline"),
     (r"\bsubmit\b|\bsubmission\b|\be-?mail\b|\bemailed\b|\bportal\b|\bupload\b|\bSam\.gov\b|\beBuy\b|\bPIEE\b|\bFedConnect\b", "Submission Method"),
     (r"\bsection\s+l\b|\bsection\s+m\b", "Sections L/M referenced"),
+    (r"\bvolume\s+(?:i|ii|iii|iv|v|vi|1|2|3|4|5|6)\b", "Volumes (if found)"),
 ]
 
 AMENDMENT_PATTERN = r"\bamendment\b|\bamendments\b|\ba0{2,}\d+\b|\bmodification\b|\bmod\b"
@@ -140,7 +139,6 @@ def detect_submission_rules(text: str) -> Dict[str, List[str]]:
             if re.search(pat, line, re.IGNORECASE):
                 grouped.setdefault(label, []).append(line)
 
-    # dedupe + limit per group
     for k in list(grouped.keys()):
         grouped[k] = unique_keep_order(grouped[k])[:12]
 
@@ -157,7 +155,6 @@ def detect_separate_submit_lines(text: str) -> List[str]:
     for l in lines:
         low = l.lower()
         if any(re.search(h, low, re.IGNORECASE) for h in SEPARATE_SUBMIT_HINTS):
-            # keep if it looks like it refers to an artifact
             if ("attachment" in low or "appendix" in low or "exhibit" in low or
                 "sf " in low or "sf-" in low or "amendment" in low or
                 "pricing" in low or "spreadsheet" in low or "excel" in low):
@@ -165,10 +162,6 @@ def detect_separate_submit_lines(text: str) -> List[str]:
     return unique_keep_order(hits)
 
 def extract_sow_snippets(text: str, max_snips: int = 6) -> List[str]:
-    """
-    Pull paragraphs likely describing SOW/PWS/scope/tasks.
-    Starter heuristic.
-    """
     paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     key = re.compile(r"\b(statement of work|scope of work|sow|pws|performance work statement|tasks?|requirements?)\b", re.IGNORECASE)
 
@@ -228,7 +221,6 @@ def compliance_warnings(rules: Dict[str, List[str]], forms: List[str], amendment
     if separate:
         warnings.append("Some items appear to require separate files/completions (signed forms, spreadsheets, attachments). Review the separate-submission list below.")
 
-    # If no warnings generated, give a safe default
     if not warnings:
         warnings.append("No major warnings detected by starter logic. Still verify Section L/M and all attachments manually.")
     return warnings
@@ -274,10 +266,9 @@ def generate_drafts(
 ) -> Dict[str, str]:
 
     kw = ", ".join(keywords[:8]) if keywords else "quality, schedule, reporting, risk"
-    vols = rules.get("Volumes (if found)", []) if rules else []
-    due = rules.get("Due Date/Deadline", ["Not detected"])[0] if rules and rules.get("Due Date/Deadline") else "Not detected"
-    method = rules.get("Submission Method", ["Not detected"])[0] if rules and rules.get("Submission Method") else "Not detected"
-
+    due = rules.get("Due Date/Deadline", ["Not detected"])[0] if rules.get("Due Date/Deadline") else "Not detected"
+    method = rules.get("Submission Method", ["Not detected"])[0] if rules.get("Submission Method") else "Not detected"
+    vols = rules.get("Volumes (if found)", [])
     certs = ", ".join(company.certifications or []) if (company.certifications and len(company.certifications) > 0) else "—"
 
     cover = f"""COVER LETTER (DRAFT)
@@ -321,9 +312,9 @@ Understanding of Requirement (SOW/PWS excerpts – starter):
 {sow_block}
 
 Approach:
-- Requirements-to-Deliverables Mapping: We map each requirement to a deliverable, owner, schedule, and acceptance criteria.
-- Execution Plan: We execute in controlled phases with weekly status, quality checks, and documented approvals.
-- Quality Control: Peer review, checklists, and objective evidence to confirm compliance.
+- Requirements-to-Deliverables Mapping: map each requirement to a deliverable, owner, schedule, and acceptance criteria.
+- Execution Plan: controlled phases with weekly status, quality checks, and documented approvals.
+- Quality Control: peer review, checklists, and objective evidence to confirm compliance.
 
 Designed around:
 {kw}
@@ -364,13 +355,14 @@ No direct past performance provided. {company.legal_name or "[Company Name]"} wi
 
     forms_block = "\n".join([f"- {f}" for f in forms]) if forms else "- None detected"
     att_block = "\n".join([f"- {a}" for a in attachments[:10]]) if attachments else "- None detected"
+    vol_block = "; ".join(vols) if vols else "Not detected"
 
     compliance = f"""COMPLIANCE SNAPSHOT (STARTER)
 
 Submission Rules (best-effort):
 - Deadline: {due}
 - Method: {method}
-- Volumes: {("; ".join(vols) if vols else "Not detected")}
+- Volumes: {vol_block}
 
 Forms detected:
 {forms_block}
@@ -378,7 +370,7 @@ Forms detected:
 Attachment/Appendix/Exhibit mentions:
 {att_block}
 
-Next step: Build a true compliance matrix aligned to Section L/M.
+Next step: build a true compliance matrix aligned to Section L/M.
 """
 
     return {
@@ -389,6 +381,109 @@ Next step: Build a true compliance matrix aligned to Section L/M.
         "Past Performance": pp,
         "Compliance Snapshot": compliance,
     }
+
+
+# =========================
+# DOCX Export
+# =========================
+
+def doc_add_heading(doc, text, level=1):
+    doc.add_heading(text, level=level)
+
+def doc_add_paragraph_lines(doc, text: str):
+    # Keep line breaks readable
+    for line in text.splitlines():
+        doc.add_paragraph(line)
+
+def build_proposal_docx_bytes(
+    company: CompanyInfo,
+    rules: Dict[str, List[str]],
+    forms: List[str],
+    attachments: List[str],
+    amendments: List[str],
+    separate: List[str],
+    warnings: List[str],
+    drafts: Dict[str, str]
+) -> bytes:
+    doc = docx.Document()
+
+    # Title
+    doc_add_heading(doc, "Proposal Draft Package", level=0)
+
+    # Company snapshot
+    doc_add_heading(doc, "Company Profile", level=1)
+    certs = ", ".join(company.certifications or []) if company.certifications else "—"
+    snapshot = f"""Company: {company.legal_name or "—"}
+DBA: {company.dba or "—"}
+Address: {company.address or "—"}
+UEI: {company.uei or "—"} | CAGE: {company.cage or "—"}
+NAICS: {company.naics or "—"} | PSC: {company.psc or "—"}
+POC: {company.poc_name or "—"} | {company.poc_email or "—"} | {company.poc_phone or "—"}
+Certifications/Set-Asides: {certs}
+Website: {company.website or "—"}
+"""
+    doc_add_paragraph_lines(doc, snapshot)
+
+    # Checklist
+    doc_add_heading(doc, "Submission Checklist (Auto-Detected - Starter)", level=1)
+
+    doc_add_heading(doc, "Submission Rules Found", level=2)
+    if rules:
+        for label, lines in rules.items():
+            doc.add_paragraph(label, style="List Bullet")
+            for ln in lines[:8]:
+                doc.add_paragraph(ln, style="List Bullet 2")
+    else:
+        doc.add_paragraph("No submission rules detected.", style="List Bullet")
+
+    doc_add_heading(doc, "Forms Detected", level=2)
+    if forms:
+        for f in forms:
+            doc.add_paragraph(f, style="List Bullet")
+    else:
+        doc.add_paragraph("None detected.", style="List Bullet")
+
+    doc_add_heading(doc, "Attachments / Appendices / Exhibits Mentions", level=2)
+    if attachments:
+        for a in attachments[:15]:
+            doc.add_paragraph(a, style="List Bullet")
+    else:
+        doc.add_paragraph("None detected.", style="List Bullet")
+
+    doc_add_heading(doc, "Amendments / Mods Referenced", level=2)
+    if amendments:
+        for a in amendments[:15]:
+            doc.add_paragraph(a, style="List Bullet")
+    else:
+        doc.add_paragraph("None detected.", style="List Bullet")
+
+    doc_add_heading(doc, "Items That Look Like Separate Submission", level=2)
+    if separate:
+        for s in separate[:20]:
+            doc.add_paragraph(s, style="List Bullet")
+    else:
+        doc.add_paragraph("None detected.", style="List Bullet")
+
+    doc_add_heading(doc, "Compliance Warnings", level=2)
+    if warnings:
+        for w in warnings:
+            doc.add_paragraph(w, style="List Bullet")
+    else:
+        doc.add_paragraph("None.", style="List Bullet")
+
+    # Draft sections
+    doc_add_heading(doc, "Draft Proposal Sections", level=1)
+    if drafts:
+        for title, body in drafts.items():
+            doc_add_heading(doc, title, level=2)
+            doc_add_paragraph_lines(doc, body)
+    else:
+        doc.add_paragraph("No draft sections generated yet.", style="List Bullet")
+
+    # Return bytes
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
 
 
 # =========================
@@ -432,7 +527,7 @@ if "company" not in st.session_state:
 
 st.sidebar.title("Path")
 page = st.sidebar.radio("Go to", ["RFP Intake", "Company Info", "Proposal Output"])
-st.sidebar.caption("Upload/paste RFP → Analyze → Proposal Output.")
+st.sidebar.caption("Upload/paste RFP → Analyze → Proposal Output → Generate → Download")
 
 
 # =========================
@@ -452,7 +547,6 @@ if page == "RFP Intake":
             if not text.strip():
                 st.warning("File uploaded, but no text could be extracted. If PDF is scanned, we’ll need OCR later.")
         if pasted.strip():
-            # If user pasted, use pasted text
             text = pasted.strip()
 
         if not text.strip():
@@ -532,7 +626,6 @@ elif page == "Company Info":
             try:
                 loaded = json.loads(up.read().decode("utf-8"))
                 if isinstance(loaded, dict):
-                    # merge safely
                     for k, v in loaded.items():
                         if hasattr(c, k):
                             setattr(c, k, v)
@@ -635,24 +728,53 @@ else:
     if not (c.legal_name or "").strip():
         st.info("Tip: Go to Company Info and enter at least your company name for better drafts.")
 
-    if st.button("Generate Draft Sections"):
-        st.session_state.drafts = generate_drafts(
-            rfp_text=st.session_state.rfp_text,
-            sow_snips=st.session_state.sow_snips or [],
-            keywords=kws,
-            rules=rules,
-            forms=forms,
-            attachments=attachments,
-            company=c
-        )
-        st.success("Draft generated. Expand the sections below.")
+    colG, colD = st.columns([1, 1])
+    with colG:
+        if st.button("Generate Draft Sections"):
+            st.session_state.drafts = generate_drafts(
+                rfp_text=st.session_state.rfp_text,
+                sow_snips=st.session_state.sow_snips or [],
+                keywords=kws,
+                rules=rules,
+                forms=forms,
+                attachments=attachments,
+                company=c
+            )
+            st.success("Draft generated. Expand the sections below.")
 
     drafts = st.session_state.drafts or {}
     if drafts:
         for title, body in drafts.items():
             with st.expander(title, expanded=(title in ["Executive Summary", "Technical Approach"])):
                 st.text_area(label="", value=body, height=260)
+    else:
+        st.info("Generate drafts to enable Word download.")
 
     st.markdown("---")
-    st.subheader("E) RFP Preview (first 1500 characters)")
+
+    # NEW: Word Download
+    st.subheader("E) Download Proposal Package")
+    if drafts:
+        doc_bytes = build_proposal_docx_bytes(
+            company=c,
+            rules=rules,
+            forms=forms,
+            attachments=attachments,
+            amendments=amendments,
+            separate=separate,
+            warnings=warns,
+            drafts=drafts
+        )
+        filename = "proposal_draft_package.docx"
+        st.download_button(
+            label="Download Proposal (.docx)",
+            data=doc_bytes,
+            file_name=filename,
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+    else:
+        st.write("Generate draft sections first, then download the Word file.")
+
+    st.markdown("---")
+    st.subheader("F) RFP Preview (first 1500 characters)")
     st.code(st.session_state.rfp_text[:1500], language="text")
