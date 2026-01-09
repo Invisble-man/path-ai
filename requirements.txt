@@ -1,3 +1,6 @@
 streamlit
 pypdf
 python-docx
+pandas
+reportlab
+openpyxl
