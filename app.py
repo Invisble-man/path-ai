@@ -1,1754 +1,928 @@
-import io
+import streamlit as st
+import pandas as pd
+import sqlite3
 import json
 import re
-import base64
+import io
+import zipfile
 from dataclasses import dataclass, asdict
-from typing import List, Dict, Tuple, Optional, Any
+from datetime import datetime
+from typing import List, Dict, Optional, Tuple
 
-import streamlit as st
-from pypdf import PdfReader
-import docx  # python-docx
-
-from docx.shared import Inches, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from openpyxl import Workbook
 
 
-# ============================================================
-# App Config
-# ============================================================
-st.set_page_config(page_title="Path — Federal Proposal Generator", layout="wide")
+# -----------------------------
+# CONFIG
+# -----------------------------
+APP_NAME = "Path"
+APP_VERSION = "v1.2.0"
+DB_PATH = "path_state.db"
 
-BUILD_VERSION = "v1.0.0"
-BUILD_DATE = "Jan 9, 2026"
+# Guided path pages (locked flow)
+PAGES = ["Task List", "Intake", "Company", "Compliance", "Draft", "Export"]
+
+# Gating labels
+GL_ACTIONABLE = "ACTIONABLE"
+GL_INFORMATIONAL = "INFORMATIONAL"
+GL_IRRELEVANT = "IRRELEVANT"
+GL_AUTO = "AUTO_RESOLVED"
+
+# Compliance status
+S_PASS = "Pass"
+S_FAIL = "Fail"
+S_UNKNOWN = "Unknown"
+
+# Buckets (smart grouping)
+BUCKETS = [
+    "Submission & Format",
+    "Required Forms",
+    "Volume I – Technical",
+    "Volume III – Price/Cost",
+    "Attachments/Exhibits",
+    "Other",
+]
+
+# Keywords/rules (Wave 1 gating – rule-based; AI can replace later)
+ACTIONABLE_STRONG = [
+    "must", "shall", "required", "offeror shall", "submit", "provide", "complete",
+    "include", "fill", "deliver", "due", "deadline", "format", "font", "margin",
+    "page limit", "pages", "electronic", "pdf", "excel", "spreadsheet", "sf1449",
+    "block", "volume", "technical", "price", "cost", "pricing", "attachment", "exhibit",
+    "forms", "representations", "certifications"
+]
+
+INFORMATIONAL_HINTS = [
+    "background", "purpose", "overview", "the government", "will", "may", "should",
+    "intended", "general", "note:", "reference"
+]
+
+IRRELEVANT_POST_AWARD = [
+    # Common “noise” items you don’t want users touching during proposal prep
+    "invoice", "invoicing", "payment", "paid", "warranty", "claims", "disputes",
+    "contractor shall bill", "final invoice", "prompt payment", "modification",
+    "change request", "deobligate"
+]
+
+AUTO_RESOLVE_HINTS = [
+    "not applicable", "n/a", "none required", "no action required"
+]
+
+# Critical field patterns (missing critical fields engine)
+CRITICAL_PATTERNS = {
+    "Submission deadline": [
+        r"offer due date",
+        r"proposal(?:s)?\s+due",
+        r"due\s+date",
+        r"deadline"
+    ],
+    "Submission method": [
+        r"submit\s+electronically",
+        r"email\s+to",
+        r"via\s+.*portal",
+        r"upload"
+    ],
+    "File format rules": [
+        r"pdf",
+        r"editable\s+spreadsheet",
+        r"excel",
+        r"file\s+format",
+        r"font",
+        r"margin",
+        r"page\s+limit"
+    ],
+    "SF1449 required blocks": [
+        r"sf\s*1449",
+        r"block\s+\d+"
+    ],
+    "Required attachments": [
+        r"attachment\s+[a-z0-9]+",
+        r"exhibit\s+[a-z0-9]+",
+        r"include\s+the\s+following"
+    ],
+}
 
 
-# ============================================================
-# UI Styling (TurboTax-like)
-# ============================================================
-def inject_css():
-    st.markdown(
-        """
-        <style>
-        /* Page spacing */
-        .block-container { padding-top: 1.0rem; padding-bottom: 2.2rem; max-width: 1200px; }
+# -----------------------------
+# DATA MODEL
+# -----------------------------
+@dataclass
+class Item:
+    item_id: str
+    text: str
+    source: str  # e.g., "RFP", "User", "Detected"
+    section: str  # e.g., "Submission Instructions"
+    bucket: str  # one of BUCKETS
+    gating_label: str  # ACTIONABLE / INFORMATIONAL / IRRELEVANT / AUTO_RESOLVED
+    confidence: float  # 0..1
+    status: str  # Pass / Fail / Unknown
+    done: bool  # checkbox only for ACTIONABLE
+    is_critical: bool
+    notes: str
+    created_at: str
 
-        /* Hide Streamlit footer/menu */
-        #MainMenu {visibility: hidden;}
-        footer {visibility: hidden;}
-        header {visibility: hidden;}
 
-        /* Cards */
-        .card {
-            border: 1px solid rgba(49,51,63,0.14);
-            border-radius: 16px;
-            padding: 16px 16px 14px 16px;
-            margin-bottom: 12px;
-            background: rgba(255,255,255,0.92);
-        }
-        .card-title {
-            font-weight: 800;
-            font-size: 1.02rem;
-            margin: 0 0 6px 0;
-        }
-        .muted { color: rgba(49,51,63,0.65); font-size: 0.92rem; }
-        .divider { height: 1px; background: rgba(49,51,63,0.10); margin: 10px 0; }
+# -----------------------------
+# DB LAYER
+# -----------------------------
+def db() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS runs (
+            run_id TEXT PRIMARY KEY,
+            name TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            intake_json TEXT,
+            company_json TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS items (
+            run_id TEXT,
+            item_id TEXT,
+            json TEXT,
+            PRIMARY KEY (run_id, item_id)
+        )
+    """)
+    conn.commit()
+    return conn
 
-        /* Notice */
-        .notice {
-            border-radius: 14px;
-            padding: 12px 14px;
-            border: 1px solid rgba(49,51,63,0.14);
-            background: rgba(52,73,94,0.06);
-            margin: 10px 0 12px 0;
-        }
-        .notice.good { background: rgba(46, 204, 113, 0.10); }
-        .notice.warn { background: rgba(241, 196, 15, 0.12); }
-        .notice.bad  { background: rgba(231, 76, 60, 0.12); }
-        .notice-title { font-weight: 800; margin: 0 0 4px 0; font-size: 0.98rem; }
-        .notice-body { margin: 0; font-size: 0.94rem; color: rgba(49,51,63,0.86); }
 
-        /* Top progress */
-        .topbar {
-            position: sticky;
-            top: 0.6rem;
-            z-index: 999;
-            background: rgba(255,255,255,0.92);
-            backdrop-filter: blur(8px);
-            border: 1px solid rgba(49,51,63,0.14);
-            border-radius: 16px;
-            padding: 12px 14px;
-            margin-bottom: 14px;
-        }
-        .topbar-title {
-            display:flex;
-            align-items:center;
-            justify-content:space-between;
-            gap:10px;
-        }
-        .brand {
-            font-weight: 900;
-            letter-spacing: 0.2px;
-        }
-        .build {
-            font-size: 0.88rem;
-            color: rgba(49,51,63,0.55);
-        }
-
-        .steps {
-            display:flex;
-            gap:8px;
-            flex-wrap: wrap;
-            margin-top: 10px;
-        }
-        .step {
-            border: 1px solid rgba(49,51,63,0.14);
-            border-radius: 999px;
-            padding: 6px 10px;
-            font-size: 0.88rem;
-            font-weight: 700;
-            color: rgba(49,51,63,0.70);
-            background: rgba(52,73,94,0.04);
-        }
-        .step.active {
-            color: rgba(49,51,63,0.95);
-            background: rgba(52,152,219,0.14);
-            border-color: rgba(52,152,219,0.35);
-        }
-        .step.done {
-            color: rgba(39,174,96,0.95);
-            background: rgba(46,204,113,0.12);
-            border-color: rgba(46,204,113,0.28);
-        }
-
-        /* Buttons */
-        div.stButton > button {
-            border-radius: 12px !important;
-            padding: 0.70rem 1.0rem !important;
-            font-weight: 800 !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True
+def create_run(run_name: str) -> str:
+    run_id = f"run_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+    now = datetime.utcnow().isoformat()
+    conn = db()
+    conn.execute(
+        "INSERT INTO runs (run_id, name, created_at, updated_at, intake_json, company_json) VALUES (?, ?, ?, ?, ?, ?)",
+        (run_id, run_name, now, now, json.dumps({}), json.dumps({}))
     )
+    conn.commit()
+    return run_id
 
 
-inject_css()
+def list_runs() -> List[Tuple[str, str, str]]:
+    conn = db()
+    rows = conn.execute("SELECT run_id, name, updated_at FROM runs ORDER BY updated_at DESC").fetchall()
+    return rows
 
 
-def ui_notice(title: str, body: str, tone: str = "neutral"):
-    tone_class = "notice"
-    if tone == "good":
-        tone_class += " good"
-    elif tone == "warn":
-        tone_class += " warn"
-    elif tone == "bad":
-        tone_class += " bad"
+def load_run_meta(run_id: str) -> Dict:
+    conn = db()
+    row = conn.execute("SELECT intake_json, company_json, name, created_at, updated_at FROM runs WHERE run_id=?", (run_id,)).fetchone()
+    if not row:
+        return {"intake": {}, "company": {}, "name": "", "created_at": "", "updated_at": ""}
+    intake_json, company_json, name, created_at, updated_at = row
+    return {
+        "intake": json.loads(intake_json or "{}"),
+        "company": json.loads(company_json or "{}"),
+        "name": name,
+        "created_at": created_at,
+        "updated_at": updated_at
+    }
 
-    st.markdown(
-        f"""
-        <div class="{tone_class}">
-            <div class="notice-title">{title}</div>
-            <p class="notice-body">{body}</p>
-        </div>
-        """,
-        unsafe_allow_html=True
+
+def save_run_meta(run_id: str, intake: Dict, company: Dict):
+    conn = db()
+    now = datetime.utcnow().isoformat()
+    conn.execute(
+        "UPDATE runs SET intake_json=?, company_json=?, updated_at=? WHERE run_id=?",
+        (json.dumps(intake), json.dumps(company), now, run_id)
     )
+    conn.commit()
 
 
-def card(title: str, subtitle: str = ""):
-    st.markdown(
-        f"""
-        <div class="card">
-          <div class="card-title">{title}</div>
-          <div class="muted">{subtitle}</div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-
-# ============================================================
-# Helpers
-# ============================================================
-def normalize_line(line: str) -> str:
-    return re.sub(r"\s+", " ", line).strip()
-
-
-def unique_keep_order(items: List[str]) -> List[str]:
-    seen = set()
-    out = []
-    for x in items:
-        k = (x or "").lower()
-        if k not in seen:
-            seen.add(k)
-            out.append(x)
+def load_items(run_id: str) -> Dict[str, Item]:
+    conn = db()
+    rows = conn.execute("SELECT item_id, json FROM items WHERE run_id=?", (run_id,)).fetchall()
+    out = {}
+    for item_id, j in rows:
+        d = json.loads(j)
+        out[item_id] = Item(**d)
     return out
 
 
-def scan_lines(text: str, max_lines: int = 10000) -> List[str]:
-    lines = []
-    for raw in (text or "").splitlines():
-        s = normalize_line(raw)
-        if s:
-            lines.append(s)
-        if len(lines) >= max_lines:
-            break
-    return lines
+def upsert_item(run_id: str, item: Item):
+    conn = db()
+    conn.execute(
+        "INSERT OR REPLACE INTO items (run_id, item_id, json) VALUES (?, ?, ?)",
+        (run_id, item.item_id, json.dumps(asdict(item)))
+    )
+    conn.commit()
 
 
-def _contains_any(text: str, keywords: List[str]) -> bool:
-    low = (text or "").lower()
-    return any(k in low for k in keywords)
+def delete_all_items(run_id: str):
+    conn = db()
+    conn.execute("DELETE FROM items WHERE run_id=?", (run_id,))
+    conn.commit()
 
 
-def label_clean(title: str) -> str:
-    # remove suffixes like "(starter)" and any numbering prefix like "1) "
-    t = re.sub(r"\s*\(starter\)\s*$", "", title or "").strip()
-    t = re.sub(r"^\s*\d+\)\s*", "", t).strip()
-    t = re.sub(r"^\s*[A-Z]\)\s*", "", t).strip()
+# -----------------------------
+# UTILS / CLASSIFIER
+# -----------------------------
+def clean_text(t: str) -> str:
+    t = (t or "").strip()
+    t = re.sub(r"\s+", " ", t)
+    # remove developer-ish prefixes
+    t = re.sub(r"(?i)\battachment mention:\s*", "", t)
+    t = re.sub(r"(?i)\bmapped section:\s*", "", t)
     return t
 
 
-# ============================================================
-# Extraction (PDF/DOCX/TXT)
-# ============================================================
-def extract_text_from_pdf(file_bytes: bytes) -> Tuple[str, Dict[str, Any]]:
-    diag = {
-        "file_type": "pdf",
-        "pages_total": 0,
-        "pages_with_text": 0,
-        "chars_extracted": 0,
-        "likely_scanned": False,
-    }
-
-    reader = PdfReader(io.BytesIO(file_bytes))
-    parts = []
-    diag["pages_total"] = len(reader.pages)
-
-    for page in reader.pages:
-        t = page.extract_text() or ""
-        if t.strip():
-            diag["pages_with_text"] += 1
-        parts.append(t)
-
-    out = "\n".join(parts).strip()
-    diag["chars_extracted"] = len(out)
-
-    ratio = 0.0
-    if diag["pages_total"] > 0:
-        ratio = diag["pages_with_text"] / max(1, diag["pages_total"])
-    if ratio < 0.25 or diag["chars_extracted"] < 800:
-        diag["likely_scanned"] = True
-
-    return out, diag
+def bucketize(text: str, section: str) -> str:
+    s = (section or "").lower()
+    t = (text or "").lower()
+    if any(k in t for k in ["deadline", "due date", "submit", "format", "font", "margin", "page limit", "electronic", "pdf", "excel", "spreadsheet"]):
+        return "Submission & Format"
+    if any(k in t for k in ["sf1449", "representations", "certifications", "sam", "cage", "uei", "duns", "blocks"]):
+        return "Required Forms"
+    if "technical" in t or "volume i" in t:
+        return "Volume I – Technical"
+    if any(k in t for k in ["price", "cost", "pricing", "volume iii"]):
+        return "Volume III – Price/Cost"
+    if any(k in t for k in ["attachment", "exhibit", "sow", "addendum"]):
+        return "Attachments/Exhibits"
+    if "submission" in s:
+        return "Submission & Format"
+    return "Other"
 
 
-def extract_text_from_docx(file_bytes: bytes) -> str:
-    document = docx.Document(io.BytesIO(file_bytes))
-    return "\n".join([p.text for p in document.paragraphs if p.text]).strip()
+def classify_gating(text: str) -> Tuple[str, float]:
+    """
+    Rule-based gating classifier (Wave 1).
+    AI will replace this later, but the data model stays the same.
+    """
+    t = (text or "").lower()
+
+    # Auto-resolve: explicit no-action phrases
+    if any(h in t for h in AUTO_RESOLVE_HINTS):
+        return (GL_AUTO, 0.85)
+
+    # Irrelevant: post-award admin terms (usually noise during proposal build)
+    if any(h in t for h in IRRELEVANT_POST_AWARD):
+        # BUT: keep "submit invoice with proposal" style (rare) as actionable
+        if "proposal" in t or "offer" in t:
+            return (GL_ACTIONABLE, 0.65)
+        return (GL_IRRELEVANT, 0.80)
+
+    # Actionable: strong directive language tied to submission
+    actionable_hits = sum(1 for k in ACTIONABLE_STRONG if k in t)
+    if actionable_hits >= 2:
+        # High confidence when directive + submit/format/forms present
+        conf = min(0.95, 0.55 + actionable_hits * 0.07)
+        return (GL_ACTIONABLE, conf)
+
+    # Informational: generic language, or low directive signal
+    info_hits = sum(1 for k in INFORMATIONAL_HINTS if k in t)
+    if info_hits >= 1:
+        conf = min(0.80, 0.50 + info_hits * 0.10)
+        return (GL_INFORMATIONAL, conf)
+
+    # Default: informational but low confidence (we hide it safely in Reference)
+    return (GL_INFORMATIONAL, 0.45)
 
 
-def read_uploaded_file(uploaded_file) -> Tuple[str, Dict[str, Any]]:
-    if not uploaded_file:
-        return "", {}
-
-    name = uploaded_file.name.lower()
-    data = uploaded_file.read()
-
-    if name.endswith(".pdf"):
-        return extract_text_from_pdf(data)
-
-    if name.endswith(".docx"):
-        text = extract_text_from_docx(data)
-        diag = {
-            "file_type": "docx",
-            "pages_total": None,
-            "pages_with_text": None,
-            "chars_extracted": len(text),
-            "likely_scanned": False,
-        }
-        return text, diag
-
-    try:
-        text = data.decode("utf-8", errors="ignore").strip()
-    except Exception:
-        text = ""
-
-    diag = {
-        "file_type": "text",
-        "pages_total": None,
-        "pages_with_text": None,
-        "chars_extracted": len(text),
-        "likely_scanned": False,
-    }
-    return text, diag
+def detect_critical(text: str) -> bool:
+    t = (text or "").lower()
+    # Critical if it touches deadline/method/format/forms/attachments
+    critical_keywords = ["deadline", "due", "offer due", "submit", "file format", "pdf", "excel", "font", "margin", "page limit", "sf1449", "block", "attachment", "exhibit"]
+    return any(k in t for k in critical_keywords)
 
 
-# ============================================================
-# RFP Intelligence
-# ============================================================
-FORM_PATTERNS = [
-    (r"\bSF[-\s]?1449\b", "SF 1449 (Commercial Items)"),
-    (r"\bSF[-\s]?33\b", "SF 33 (Solicitation/Offer and Award)"),
-    (r"\bSF[-\s]?30\b", "SF 30 (Amendment/Modification)"),
-    (r"\bSF[-\s]?18\b", "SF 18 (RFQ)"),
-    (r"\bDD[-\s]?1155\b", "DD 1155 (Order for Supplies or Services)"),
-    (r"\bDD[-\s]?254\b", "DD 254 (Security Classification Spec)"),
-]
-
-ATTACHMENT_KEYWORDS = [
-    "attachment", "appendix", "exhibit", "annex", "enclosure", "addendum",
-    "amendment", "amendments", "modification", "mods",
-    "pricing", "price schedule", "cost proposal", "rate sheet", "spreadsheet", "xlsx", "excel",
-    "reps and certs", "representations and certifications",
-    "sf-1449", "sf 1449", "sf-33", "sf 33", "sf-30", "sf 30", "sf-18", "sf 18",
-]
-
-SUBMISSION_RULE_PATTERNS = [
-    (r"\bpage limit\b|\bnot exceed\s+\d+\s+pages\b|\bpages maximum\b", "Page Limit"),
-    (r"\bfont\b|\b12[-\s]?point\b|\b11[-\s]?point\b|\bTimes New Roman\b|\bArial\b|\bCalibri\b", "Font Requirement"),
-    (r"\bmargins?\b|\b1 inch\b|\bone inch\b|\b0\.?\d+\s*inch\b|\b1\"\b", "Margin Requirement"),
-    (r"\bdue\b|\bdue date\b|\bdeadline\b|\bno later than\b|\boffers?\s+are\s+due\b|\bproposal\s+is\s+due\b", "Due Date/Deadline"),
-    (r"\bsubmit\b|\bsubmission\b|\be-?mail\b|\bemailed\b|\bportal\b|\bupload\b|\bsam\.gov\b|\bebuy\b|\bpiee\b|\bfedconnect\b", "Submission Method"),
-    (r"\bfile format\b|\bpdf\b|\bdocx\b|\bexcel\b|\bxlsx\b|\bzip\b|\bencrypt\b|\bpassword\b", "File Format Rules"),
-    (r"\bsection\s+l\b|\bsection\s+m\b", "Sections L/M referenced"),
-    (r"\bvolume\s+(?:i|ii|iii|iv|v|vi|1|2|3|4|5|6)\b", "Volumes (if found)"),
-]
-
-AMENDMENT_PATTERN = r"\bamendment\b|\bamendments\b|\ba0{2,}\d+\b|\bmodification\b|\bmod\b"
-
-SEPARATE_SUBMIT_HINTS = [
-    r"\bsigned\b",
-    r"\bsignature\b",
-    r"\bcomplete and return\b",
-    r"\bfill(?:ed)? out\b",
-    r"\bsubmit separately\b",
-    r"\bseparate file\b",
-    r"\binclude as an attachment\b",
-    r"\bexcel\b|\bspreadsheet\b|\bxlsx\b",
-]
-
-CERT_KEYWORDS = [
-    ("SDVOSB", r"\bservice[-\s]?disabled veteran[-\s]?owned\b|\bsdv?osb\b"),
-    ("VOSB", r"\bveteran[-\s]?owned\b|\bvosb\b"),
-    ("8(a)", r"\b8\(a\)\b|\b8a\b"),
-    ("WOSB/EDWOSB", r"\bwosb\b|\bedwosb\b|\bwoman[-\s]?owned\b"),
-    ("HUBZone", r"\bhubzone\b"),
-]
-
-PRICE_HINTS = [
-    "price", "pricing", "cost", "rates", "rate", "labor category", "labor categories",
-    "excel", "xlsx", "spreadsheet", "price schedule", "cost proposal", "fee"
-]
-
-PAST_PERF_HINTS = [
-    "past performance", "cpars", "references", "experience", "relevant experience", "prior contracts"
-]
+def dedupe_items(items: List[Item]) -> List[Item]:
+    """
+    Simple dedupe: merge near-exact duplicates by normalized text.
+    Later AI can do semantic merge.
+    """
+    seen = {}
+    for it in items:
+        key = re.sub(r"[^a-z0-9 ]", "", it.text.lower())
+        key = re.sub(r"\s+", " ", key).strip()
+        if key in seen:
+            # keep the more "actionable" version if conflict
+            existing = seen[key]
+            priority = {GL_ACTIONABLE: 3, GL_INFORMATIONAL: 2, GL_AUTO: 1, GL_IRRELEVANT: 0}
+            if priority[it.gating_label] > priority[existing.gating_label]:
+                seen[key] = it
+            continue
+        seen[key] = it
+    return list(seen.values())
 
 
-def find_forms(text: str) -> List[str]:
-    found = []
-    for pat, label in FORM_PATTERNS:
-        if re.search(pat, text or "", re.IGNORECASE):
-            found.append(label)
-    return unique_keep_order(found)
+# -----------------------------
+# EXTRACTION / MISSING CRITICAL FIELDS ENGINE
+# -----------------------------
+def extract_items_from_text(raw: str) -> List[Tuple[str, str]]:
+    """
+    Returns list of (section, requirement_text).
+    Heuristic: lines with "R###" or bullet-like directives become items.
+    """
+    raw = raw or ""
+    lines = [clean_text(x) for x in raw.splitlines() if clean_text(x)]
+    out = []
 
-
-def find_attachment_lines(text: str) -> List[str]:
-    lines = scan_lines(text)
-    hits = []
+    current_section = "General"
     for line in lines:
-        low = line.lower()
-        if any(k in low for k in ATTACHMENT_KEYWORDS):
-            if len(line) <= 320:
-                hits.append(line)
-    return unique_keep_order(hits)
-
-
-def detect_submission_rules(text: str) -> Dict[str, List[str]]:
-    lines = scan_lines(text)
-    grouped: Dict[str, List[str]] = {}
-    for line in lines:
-        for pat, label in SUBMISSION_RULE_PATTERNS:
-            if re.search(pat, line, re.IGNORECASE):
-                grouped.setdefault(label, []).append(line)
-    for k in list(grouped.keys()):
-        grouped[k] = unique_keep_order(grouped[k])[:12]
-    return grouped
-
-
-DATE_PATTERNS = [
-    r"\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2},\s+\d{4}\b",
-    r"\b\d{1,2}/\d{1,2}/\d{2,4}\b",
-    r"\b\d{4}-\d{2}-\d{2}\b",
-]
-TIME_PATTERNS = [
-    r"\b\d{1,2}:\d{2}\s*(?:am|pm)\b",
-    r"\b\d{1,2}\s*(?:am|pm)\b",
-    r"\b\d{1,2}:\d{2}\b",
-]
-TZ_PATTERNS = [
-    r"\b(?:et|ct|mt|pt|est|edt|cst|cdt|mst|mdt|pst|pdt|utc|zulu)\b",
-]
-DUE_KEYWORDS = [
-    "offer due", "offers are due", "proposal due", "proposal is due", "submission due",
-    "deadline", "no later than", "due date", "closing date", "response due"
-]
-
-
-def refine_due_date_rule(text: str, rules: Dict[str, List[str]]) -> Dict[str, List[str]]:
-    lines = scan_lines(text, max_lines=14000)
-
-    best = None
-    best_score = -1
-
-    for line in lines:
-        low = line.lower()
-
-        if not any(k in low for k in DUE_KEYWORDS) and "due" not in low:
+        # Section header heuristic
+        if len(line) <= 60 and (line.isupper() or line.endswith(":")):
+            current_section = line.replace(":", "").title()
             continue
 
-        if "invoice" in low or "invoices" in low or "payment" in low:
-            continue
+        # Requirement line heuristic
+        if re.match(r"^(R\d{3}|\d+\)|\(\w\)|•|-)\s*", line) or any(w in line.lower() for w in ["shall", "must", "required", "submit", "due"]):
+            out.append((current_section, line))
 
-        has_date = any(re.search(p, line, re.IGNORECASE) for p in DATE_PATTERNS)
-        has_time = any(re.search(p, line, re.IGNORECASE) for p in TIME_PATTERNS)
-        has_tz = any(re.search(p, line, re.IGNORECASE) for p in TZ_PATTERNS)
-
-        score = 0
-        if any(k in low for k in DUE_KEYWORDS): score += 3
-        if "no later than" in low: score += 2
-        if "deadline" in low: score += 2
-        if has_date: score += 4
-        if has_time: score += 2
-        if has_tz: score += 1
-        if "section l" in low or "instructions" in low: score += 1
-        if len(line) > 220: score -= 1
-
-        if score > best_score:
-            best_score = score
-            best = line
-
-    if best and best_score >= 6:
-        rules = dict(rules or {})
-        rules["Due Date/Deadline"] = [best]
-    return rules
-
-
-def detect_amendment_lines(text: str) -> List[str]:
-    lines = scan_lines(text)
-    hits = [l for l in lines if re.search(AMENDMENT_PATTERN, l, re.IGNORECASE)]
-    return unique_keep_order(hits)
-
-
-def detect_separate_submit_lines(text: str) -> List[str]:
-    lines = scan_lines(text)
-    hits = []
-    for l in lines:
-        low = l.lower()
-        if any(re.search(h, low, re.IGNORECASE) for h in SEPARATE_SUBMIT_HINTS):
-            if ("attachment" in low or "appendix" in low or "exhibit" in low or
-                "sf " in low or "sf-" in low or "amendment" in low or
-                "pricing" in low or "spreadsheet" in low or "excel" in low):
-                hits.append(l)
-    return unique_keep_order(hits)
-
-
-def extract_sow_snippets(text: str, max_snips: int = 6) -> List[str]:
-    paras = [p.strip() for p in re.split(r"\n\s*\n", text or "") if p.strip()]
-    key = re.compile(r"\b(statement of work|scope of work|sow|pws|performance work statement|tasks?|requirements?)\b", re.IGNORECASE)
-    cands = []
-    for p in paras:
-        if key.search(p):
-            cands.append(p[:900])
-    if not cands:
-        cands = paras[:max_snips]
-    out, seen = [], set()
-    for c in cands:
-        k = c.lower()
-        if k not in seen:
-            seen.add(k)
-            out.append(c)
-        if len(out) >= max_snips:
-            break
     return out
 
 
-def derive_tailor_keywords(snips: List[str]) -> List[str]:
-    text = " ".join(snips or []).lower()
-    stop = set("""
-        the a an and or to of for in on with by from as at is are be shall will may must
-        offer proposal contractor government agency work statement performance requirement requirements
-        services service task tasks provide providing include including
-        section submission submit due date deadline pages page limit font margin margins
-    """.split())
-    words = re.findall(r"[a-z]{4,}", text)
-    freq: Dict[str, int] = {}
-    for w in words:
-        if w in stop:
-            continue
-        freq[w] = freq.get(w, 0) + 1
-    top = sorted(freq.items(), key=lambda x: (-x[1], x[0]))[:12]
-    return [w for w, _ in top]
+def build_missing_critical_tasks(sol_text: str) -> List[Item]:
+    """
+    If we can't detect key fields in the solicitation text, create actionable critical tasks.
+    """
+    t = (sol_text or "").lower()
+    tasks = []
+    now = datetime.utcnow().isoformat()
+
+    for name, patterns in CRITICAL_PATTERNS.items():
+        found = False
+        for p in patterns:
+            if re.search(p, t, re.IGNORECASE):
+                found = True
+                break
+        if not found:
+            item_id = f"CRIT_{re.sub(r'[^A-Z0-9]+', '_', name.upper())}"
+            tasks.append(Item(
+                item_id=item_id,
+                text=f"Confirm/enter: {name}",
+                source="Detected",
+                section="Critical Fields",
+                bucket="Submission & Format" if "Submission" in name or "File format" in name else "Required Forms",
+                gating_label=GL_ACTIONABLE,
+                confidence=0.90,
+                status=S_UNKNOWN,
+                done=False,
+                is_critical=True,
+                notes="This field was not detected in the solicitation text. Add it manually or verify from the RFP.",
+                created_at=now
+            ))
+    return tasks
 
 
-def detect_required_certifications(text: str) -> List[str]:
-    found = []
-    for label, pat in CERT_KEYWORDS:
-        if re.search(pat, text or "", re.IGNORECASE):
-            found.append(label)
-    return unique_keep_order(found)
+# -----------------------------
+# KPI / PROGRESS
+# -----------------------------
+def compute_kpis(items: Dict[str, Item]) -> Dict:
+    actionable = [i for i in items.values() if i.gating_label == GL_ACTIONABLE]
+    if not actionable:
+        return {
+            "completion": 0.0,
+            "pass": 0, "fail": 0, "unknown": 0,
+            "gate": "GATE NOT RUN",
+            "missing_critical": 0
+        }
 
+    # Completion: actionable tasks marked done OR status not unknown (either is acceptable)
+    completed = [i for i in actionable if (i.done or i.status in [S_PASS, S_FAIL])]
+    completion = len(completed) / max(1, len(actionable))
 
-def compliance_warnings(rules: Dict[str, List[str]], forms: List[str], amendments: List[str], separate: List[str]) -> List[str]:
-    warnings = []
-    if not rules:
-        warnings.append("No clear submission rules detected. Upload or paste Section L/M and the cover page.")
+    pass_ct = sum(1 for i in actionable if i.status == S_PASS)
+    fail_ct = sum(1 for i in actionable if i.status == S_FAIL)
+    unk_ct = sum(1 for i in actionable if i.status == S_UNKNOWN)
+
+    missing_critical = sum(1 for i in actionable if i.is_critical and i.status == S_UNKNOWN and not i.done)
+
+    # Gate rules (strict + simple)
+    # You can tune these later.
+    if fail_ct > 0:
+        gate = "FAIL"
+    elif unk_ct > max(2, int(0.10 * len(actionable))):
+        gate = "AT RISK"
     else:
-        if "Due Date/Deadline" not in rules:
-            warnings.append("Due date/deadline not clearly detected. Verify cover page + Section L.")
-        if "Submission Method" not in rules:
-            warnings.append("Submission method not clearly detected (email/portal). Verify exactly where/how to submit.")
-        if "File Format Rules" not in rules:
-            warnings.append("File format rules not clearly detected. Confirm required formats (PDF/Excel/ZIP) and naming rules.")
-        if any(k in rules for k in ["Page Limit", "Font Requirement", "Margin Requirement"]):
-            warnings.append("Formatting rules detected (page/font/margins). Violations can cause rejection as non-compliant.")
-    if forms:
-        warnings.append("SF/DD forms detected. Confirm each required form is completed and signed where required.")
-    if amendments:
-        warnings.append("Amendments/modifications referenced. Confirm all amendments acknowledged and instructions incorporated.")
-    if separate:
-        warnings.append("Items may require separate files/submissions (signed forms, spreadsheets, attachments). Review separate submission indicators.")
-    if not warnings:
-        warnings.append("No major issues detected by automated checks. Still verify Section L/M and all attachments manually.")
-    return warnings
-
-
-# ============================================================
-# Company Info
-# ============================================================
-@dataclass
-class CompanyInfo:
-    legal_name: str = ""
-    address: str = ""
-    uei: str = ""
-    cage: str = ""
-    naics: str = ""
-    psc: str = ""
-    poc_name: str = ""
-    poc_email: str = ""
-    poc_phone: str = ""
-    certifications: List[str] = None
-    capabilities: str = ""
-    differentiators: str = ""
-    past_performance: str = ""
-    website: str = ""
-
-    proposal_title: str = ""
-    solicitation_number: str = ""
-    agency_customer: str = ""
-
-    signer_name: str = ""
-    signer_title: str = ""
-    signer_company: str = ""
-    signer_phone: str = ""
-    signer_email: str = ""
-
-    def to_dict(self):
-        d = asdict(self)
-        if d["certifications"] is None:
-            d["certifications"] = []
-        return d
-
-
-def missing_info_alerts(company: CompanyInfo) -> Tuple[List[str], List[str]]:
-    critical = []
-    recommended = []
-
-    if not company.legal_name.strip():
-        critical.append("Company legal name is missing.")
-    if not company.uei.strip():
-        critical.append("UEI is missing (commonly required).")
-    if not company.poc_name.strip():
-        critical.append("POC name is missing.")
-    if not company.poc_email.strip():
-        critical.append("POC email is missing.")
-
-    if not company.address.strip():
-        recommended.append("Business address is missing (often used on cover letter/title page).")
-    if not company.certifications or (len(company.certifications) == 1 and company.certifications[0] == "None"):
-        recommended.append("Certifications/set-asides not selected (if applicable).")
-    if not company.capabilities.strip():
-        recommended.append("Capabilities section is empty (hurts competitiveness).")
-    if not company.differentiators.strip():
-        recommended.append("Differentiators section is empty (hurts competitiveness).")
-    if not company.past_performance.strip():
-        recommended.append("Past performance is blank (draft uses capability-based language).")
-
-    if not company.proposal_title.strip():
-        recommended.append("Proposal/Contract title is blank (recommended for title page).")
-    if not company.solicitation_number.strip():
-        recommended.append("Solicitation number is blank (recommended for title page).")
-    if not company.agency_customer.strip():
-        recommended.append("Agency/Customer is blank (recommended for title page).")
-
-    return critical, recommended
-
-
-# ============================================================
-# Draft Generator
-# ============================================================
-def _signature_block(company: CompanyInfo) -> str:
-    signer_name = (company.signer_name.strip() or company.poc_name.strip())
-    signer_title = company.signer_title.strip()
-    signer_company = (company.signer_company.strip() or company.legal_name.strip())
-    signer_phone = (company.signer_phone.strip() or company.poc_phone.strip())
-    signer_email = (company.signer_email.strip() or company.poc_email.strip())
-
-    lines = ["Respectfully,", "", "", ""]
-    if signer_name: lines.append(signer_name)
-    if signer_title: lines.append(signer_title)
-    if signer_company: lines.append(signer_company)
-    if signer_phone: lines.append(signer_phone)
-    if signer_email: lines.append(signer_email)
-    return "\n".join(lines).strip()
-
-
-def generate_drafts(
-    sow_snips: List[str],
-    keywords: List[str],
-    rules: Dict[str, List[str]],
-    forms: List[str],
-    attachments: List[str],
-    company: CompanyInfo
-) -> Dict[str, str]:
-    kw = ", ".join((keywords or [])[:8]) if keywords else "quality, schedule, reporting, risk"
-    due = rules.get("Due Date/Deadline", ["Not detected"])[0] if rules.get("Due Date/Deadline") else "Not detected"
-    method = rules.get("Submission Method", ["Not detected"])[0] if rules.get("Submission Method") else "Not detected"
-    vols = rules.get("Volumes (if found)", [])
-    certs = ", ".join(company.certifications or []) if company.certifications else "—"
-
-    sow_block = "\n".join([f"- {s}" for s in (sow_snips or [])[:3]]) if sow_snips else "- [No SOW snippets detected]"
-    vol_block = "; ".join(vols) if vols else "Not detected"
-
-    cover = f"""COVER LETTER
-
-{company.legal_name or "[Company Name]"}
-{company.address or "[Address]"}
-UEI: {company.uei or "[UEI]"} | CAGE: {company.cage or "[CAGE]"}
-POC: {company.poc_name or "[POC]"} | {company.poc_email or "[email]"} | {company.poc_phone or "[phone]"}
-Certifications: {certs}
-
-Subject: {company.proposal_title or "Proposal Submission"}
-
-Dear Contracting Officer,
-
-{company.legal_name or "[Company Name]"} submits this proposal in response to the solicitation. We understand the Government’s requirement and will execute with a low-risk approach aligned to: {kw}.
-
-Submission details (auto-detected — verify Section L and cover page):
-- Deadline: {due}
-- Submission Method: {method}
-
-{_signature_block(company)}
-"""
-
-    exec_summary = f"""EXECUTIVE SUMMARY
-
-{company.legal_name or "[Company Name]"} will deliver the required scope with disciplined execution, clear communication, and measurable outcomes.
-
-Tailoring keywords (auto-extracted):
-{kw}
-
-Capabilities:
-{company.capabilities or "[Add capabilities]"}
-"""
-
-    tech = f"""TECHNICAL APPROACH
-
-Understanding of Requirement (excerpts — verify full SOW/PWS):
-{sow_block}
-
-Approach:
-- Requirements-to-Deliverables Mapping: map each requirement to a deliverable, owner, schedule, and acceptance criteria.
-- Execution Plan: controlled phases with weekly status, quality checks, and documented approvals.
-- Quality Control: peer review, checklists, and objective evidence to confirm compliance.
-
-Designed around:
-{kw}
-"""
-
-    mgmt = f"""MANAGEMENT PLAN
-
-Program Management:
-- Single accountable Program Manager and clear escalation path.
-- Weekly status reporting, risk log, action tracker, and stakeholder communications.
-
-Staffing:
-- Roles aligned to SOW tasks; surge support available.
-- Controlled onboarding, SOPs, and oversight.
-
-Risk Management:
-- Identify risks early, mitigate, and communicate impacts with options.
-"""
-
-    if company.past_performance.strip():
-        pp = f"""PAST PERFORMANCE
-
-Provided Past Performance:
-{company.past_performance}
-
-Relevance:
-- Demonstrates delivery of similar scope and disciplined execution.
-"""
-    else:
-        pp = f"""PAST PERFORMANCE (CAPABILITY-BASED)
-
-No direct past performance provided. {company.legal_name or "[Company Name]"} will demonstrate responsibility and capability through:
-- Strong management controls and reporting cadence
-- Defined QC checks and documented processes
-- Staffing aligned to the requirement
-- Risk mitigation and escalation procedures
-"""
-
-    forms_block = "\n".join([f"- {f}" for f in forms]) if forms else "- None detected"
-    att_block = "\n".join([f"- {a}" for a in (attachments or [])[:10]]) if attachments else "- None detected"
-
-    compliance = f"""COMPLIANCE SNAPSHOT
-
-Submission Details (auto-detected — verify Section L/M):
-- Deadline: {due}
-- Method: {method}
-- Volumes: {vol_block}
-
-Forms detected:
-{forms_block}
-
-Attachment/Appendix/Exhibit mentions:
-{att_block}
-
-Next step: build a complete compliance matrix aligned to Section L/M.
-"""
+        gate = "PASS"
 
     return {
-        "Cover Letter": cover,
-        "Executive Summary": exec_summary,
-        "Technical Approach": tech,
-        "Management Plan": mgmt,
-        "Past Performance": pp,
-        "Compliance Snapshot": compliance,
+        "completion": completion,
+        "pass": pass_ct,
+        "fail": fail_ct,
+        "unknown": unk_ct,
+        "gate": gate,
+        "missing_critical": missing_critical
     }
 
 
-# ============================================================
-# Compliance Matrix (Best Effort)
-# ============================================================
-REQ_TRIGGER = re.compile(r"\b(shall|must|will)\b", re.IGNORECASE)
-REQ_NUMBERED = re.compile(r"^(\(?[a-z0-9]{1,4}\)?[\.\)]|\d{1,3}\.)\s+", re.IGNORECASE)
-
-DEFAULT_SECTIONS = [
-    "Cover Letter",
-    "Executive Summary",
-    "Technical Approach",
-    "Management Plan",
-    "Past Performance",
-    "Compliance Snapshot",
-]
-
-
-def auto_map_section(req_text: str) -> str:
-    t = (req_text or "").lower()
-    if "past performance" in t or "reference" in t or "experience" in t or "cpars" in t:
-        return "Past Performance"
-    if "management" in t or "staff" in t or "key personnel" in t or "organization" in t or "resume" in t:
-        return "Management Plan"
-    if "technical" in t or "approach" in t or "method" in t or "solution" in t or "work plan" in t:
-        return "Technical Approach"
-    if "executive summary" in t or "summary" in t:
-        return "Executive Summary"
-    if "cover letter" in t or "signed" in t or "signature" in t:
-        return "Cover Letter"
-    if "compliance" in t or "matrix" in t or "section l" in t or "section m" in t:
-        return "Compliance Snapshot"
-    return "Technical Approach"
-
-
-def extract_requirements_v2(rfp_text: str, max_reqs: int = 60) -> List[Dict[str, str]]:
-    lines = scan_lines(rfp_text, max_lines=12000)
-
-    lm_indexes = []
-    for i, line in enumerate(lines):
-        if re.search(r"\bsection\s+l\b|\binstructions to offerors\b", line, re.IGNORECASE):
-            lm_indexes.append(i)
-        if re.search(r"\bsection\s+m\b|\bevaluation criteria\b", line, re.IGNORECASE):
-            lm_indexes.append(i)
-
-    windows = []
-    for idx in lm_indexes[:10]:
-        start = max(0, idx - 80)
-        end = min(len(lines), idx + 260)
-        windows.append((start, end))
-
-    if not windows:
-        windows = [(0, len(lines))]
-
-    reqs = []
-    seen = set()
-    rid = 1
-
-    for start, end in windows:
-        for i in range(start, end):
-            line = lines[i]
-            if len(line) < 25:
-                continue
-
-            is_numbered = bool(REQ_NUMBERED.search(line))
-            has_trigger = bool(REQ_TRIGGER.search(line))
-
-            if has_trigger and (is_numbered or "offeror" in line.lower() or "proposal" in line.lower() or "submit" in line.lower()):
-                norm = line.lower()
-                if norm in seen:
-                    continue
-                seen.add(norm)
-
-                reqs.append({
-                    "id": f"R{rid:03d}",
-                    "requirement": line,
-                    "source": "Section L/M (best-effort)" if lm_indexes else "RFP (best-effort)"
-                })
-                rid += 1
-                if len(reqs) >= max_reqs:
-                    return reqs
-
-    return reqs
-
-
-def compute_matrix_kpis(matrix_rows: List[Dict[str, str]]) -> Dict[str, int]:
-    total = len(matrix_rows or [])
-    pass_ct = sum(1 for r in (matrix_rows or []) if (r.get("status") == "Pass"))
-    fail_ct = sum(1 for r in (matrix_rows or []) if (r.get("status") == "Fail"))
-    unk_ct = sum(1 for r in (matrix_rows or []) if (r.get("status") in [None, "", "Unknown"]))
-    return {"total": total, "pass": pass_ct, "fail": fail_ct, "unknown": unk_ct}
-
-
-def run_pre_submit_gate(company: CompanyInfo, rules: Dict[str, List[str]], matrix_rows: List[Dict[str, str]], deadline_acknowledged: bool) -> Dict[str, Any]:
-    crit, _ = missing_info_alerts(company)
-    kpi = compute_matrix_kpis(matrix_rows)
-
-    blocked = []
-    risk = []
-
-    if kpi["fail"] > 0:
-        blocked.append(f"{kpi['fail']} requirements are marked FAIL in the compliance matrix.")
-    if crit:
-        blocked.append("Critical company info missing: " + "; ".join(crit))
-
-    deadline_detected = bool(rules.get("Due Date/Deadline"))
-    if deadline_detected and not deadline_acknowledged:
-        blocked.append("Deadline detected but not acknowledged.")
-
-    if kpi["unknown"] > 0:
-        risk.append(f"{kpi['unknown']} requirements are still UNKNOWN (not evaluated).")
-    if not rules.get("Submission Method"):
-        risk.append("Submission method not detected. Verify email/portal details in Section L.")
-
-    if blocked:
-        return {"status": "NOT COMPLIANT", "level": "blocked", "blocked_reasons": blocked, "risk_reasons": risk, "kpi": kpi}
-    if risk:
-        return {"status": "AT RISK", "level": "risk", "blocked_reasons": [], "risk_reasons": risk, "kpi": kpi}
-    return {"status": "READY", "level": "ready", "blocked_reasons": [], "risk_reasons": [], "kpi": kpi}
-
-
-# ============================================================
-# Word Export Helpers
-# ============================================================
-def add_field(paragraph, field_code: str):
-    run = paragraph.add_run()
-    r = run._r
-
-    fldChar1 = OxmlElement('w:fldChar')
-    fldChar1.set(qn('w:fldCharType'), 'begin')
-
-    instrText = OxmlElement('w:instrText')
-    instrText.set(qn('xml:space'), 'preserve')
-    instrText.text = field_code
-
-    fldChar2 = OxmlElement('w:fldChar')
-    fldChar2.set(qn('w:fldCharType'), 'separate')
-
-    fldChar3 = OxmlElement('w:fldChar')
-    fldChar3.set(qn('w:fldCharType'), 'end')
-
-    r.append(fldChar1)
-    r.append(instrText)
-    r.append(fldChar2)
-    r.append(fldChar3)
-
-
-def add_page_numbers(doc: docx.Document):
-    section = doc.sections[0]
-    footer = section.footer
-    p = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.add_run("Page ")
-    add_field(p, "PAGE")
-    p.add_run(" of ")
-    add_field(p, "NUMPAGES")
-
-
-def set_word_styles_no_blue_links(doc: docx.Document):
-    try:
-        hl = doc.styles["Hyperlink"]
-        hl.font.color.rgb = RGBColor(0, 0, 0)
-        hl.font.underline = False
-    except Exception:
-        pass
-
-
-def add_table_of_contents(doc: docx.Document):
-    doc.add_page_break()
-    doc.add_heading("Table of Contents", level=1)
-    p = doc.add_paragraph()
-    add_field(p, r'TOC \o "1-3" \z \u')
-    doc.add_page_break()
-
-
-def add_title_page(doc: docx.Document, company: CompanyInfo, logo_bytes: Optional[bytes]):
-    doc.add_paragraph("")
-    doc.add_paragraph("")
-    doc.add_paragraph("")
-
-    if logo_bytes:
-        try:
-            p = doc.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.add_run().add_picture(io.BytesIO(logo_bytes), width=Inches(2.2))
-            doc.add_paragraph("")
-        except Exception:
-            pass
-
-    title = company.proposal_title.strip() or "Proposal"
-    company_name = company.legal_name.strip() or "[Company Name]"
-    sol = company.solicitation_number.strip() or "[Solicitation #]"
-    agency = company.agency_customer.strip() or "[Agency/Customer]"
-
-    p1 = doc.add_paragraph()
-    p1.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r1 = p1.add_run(company_name); r1.bold = True
-
-    p2 = doc.add_paragraph()
-    p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r2 = p2.add_run(title); r2.bold = True
-
-    doc.add_paragraph("")
-    p3 = doc.add_paragraph(); p3.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p3.add_run(f"Solicitation: {sol}")
-
-    p4 = doc.add_paragraph(); p4.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p4.add_run(f"Agency/Customer: {agency}")
-
-    doc.add_paragraph("")
-    p5 = doc.add_paragraph(); p5.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p5.add_run(f"UEI: {company.uei or '[UEI]'}    CAGE: {company.cage or '[CAGE]'}")
-
-    doc.add_page_break()
-
-
-def add_paragraph_lines(doc: docx.Document, text: str):
-    for line in (text or "").splitlines():
-        doc.add_paragraph(line)
-
-
-def build_proposal_docx_bytes(
-    company: CompanyInfo,
-    logo_bytes: Optional[bytes],
-    rfp_diag: Dict[str, Any],
-    rules: Dict[str, List[str]],
-    forms: List[str],
-    attachments: List[str],
-    amendments: List[str],
-    separate: List[str],
-    warnings: List[str],
-    matrix_rows: List[Dict[str, str]],
-    drafts: Dict[str, str],
-    validation_result: Optional[Dict[str, Any]],
-) -> bytes:
-    doc = docx.Document()
-
-    set_word_styles_no_blue_links(doc)
-    add_page_numbers(doc)
-    add_title_page(doc, company, logo_bytes)
-    add_table_of_contents(doc)
-
-    # Diagnostics
-    doc.add_heading("Diagnostics Summary", level=1)
-    if rfp_diag:
-        doc.add_paragraph(f"File Type: {rfp_diag.get('file_type','—')}")
-        if rfp_diag.get("pages_total") is not None:
-            doc.add_paragraph(f"Pages: {rfp_diag.get('pages_total','—')}")
-        if rfp_diag.get("pages_with_text") is not None:
-            doc.add_paragraph(f"Pages with text: {rfp_diag.get('pages_with_text','—')}")
-        doc.add_paragraph(f"Characters extracted: {rfp_diag.get('chars_extracted','—')}")
-        doc.add_paragraph(f"Likely scanned: {'Yes' if rfp_diag.get('likely_scanned') else 'No'}")
-    else:
-        doc.add_paragraph("No file diagnostics available (text may have been pasted).")
-    doc.add_page_break()
-
-    # Gate
-    doc.add_heading("Pre-Submission Gate Result", level=1)
-    if validation_result:
-        doc.add_paragraph(f"Status: {validation_result.get('status','—')}")
-        if validation_result.get("blocked_reasons"):
-            doc.add_paragraph("Blocked Reasons:", style="List Bullet")
-            for r in validation_result["blocked_reasons"]:
-                doc.add_paragraph(r, style="List Bullet 2")
-        if validation_result.get("risk_reasons"):
-            doc.add_paragraph("Risk Reasons:", style="List Bullet")
-            for r in validation_result["risk_reasons"]:
-                doc.add_paragraph(r, style="List Bullet 2")
-    else:
-        doc.add_paragraph("Gate has not been run yet.")
-    doc.add_page_break()
-
-    # Company profile
-    doc.add_heading("Company Profile", level=1)
-    certs = ", ".join(company.certifications or []) if company.certifications else "—"
-    profile = f"""Company: {company.legal_name or "—"}
-Address: {company.address or "—"}
-UEI: {company.uei or "—"} | CAGE: {company.cage or "—"}
-NAICS: {company.naics or "—"} | PSC: {company.psc or "—"}
-POC: {company.poc_name or "—"} | {company.poc_email or "—"} | {company.poc_phone or "—"}
-Certifications/Set-Asides: {certs}
-Website: {company.website or "—"}
-"""
-    add_paragraph_lines(doc, profile)
-
-    # Matrix
-    doc.add_heading("Compliance Matrix (Best-Effort)", level=1)
-    if matrix_rows:
-        table = doc.add_table(rows=1, cols=5)
-        hdr = table.rows[0].cells
-        hdr[0].text = "Req ID"
-        hdr[1].text = "Requirement"
-        hdr[2].text = "Mapped Section"
-        hdr[3].text = "Status"
-        hdr[4].text = "Notes"
-
-        for row in matrix_rows[:120]:
-            r = table.add_row().cells
-            r[0].text = row.get("id", "")
-            r[1].text = row.get("requirement", "")
-            r[2].text = row.get("section", "")
-            r[3].text = row.get("status", "Unknown")
-            r[4].text = row.get("notes", "")
-    else:
-        doc.add_paragraph("No requirements extracted yet.", style="List Bullet")
-
-    # Evidence (only include if detected)
-    doc.add_heading("Submission Rules (Detected)", level=2)
-    if rules:
-        for k, lines in rules.items():
-            doc.add_paragraph(k, style="List Bullet")
-            for ln in lines[:6]:
-                doc.add_paragraph(ln, style="List Bullet 2")
-    else:
-        doc.add_paragraph("None detected.", style="List Bullet")
-
-    if forms:
-        doc.add_heading("Forms (Detected)", level=2)
-        for f in forms:
-            doc.add_paragraph(f, style="List Bullet")
-
-    if attachments:
-        doc.add_heading("Attachments / Exhibits (Detected)", level=2)
-        for a in attachments[:18]:
-            doc.add_paragraph(a, style="List Bullet")
-
-    if amendments:
-        doc.add_heading("Amendments / Mods (Detected)", level=2)
-        for a in amendments[:18]:
-            doc.add_paragraph(a, style="List Bullet")
-
-    if separate:
-        doc.add_heading("Separate Submission Indicators (Detected)", level=2)
-        for s in separate[:22]:
-            doc.add_paragraph(s, style="List Bullet")
-
-    doc.add_heading("Warnings (Detected)", level=2)
-    if warnings:
-        for w in warnings:
-            doc.add_paragraph(w, style="List Bullet")
-    else:
-        doc.add_paragraph("None.", style="List Bullet")
-
-    # Draft sections
-    doc.add_page_break()
-    doc.add_heading("Draft Proposal Sections", level=1)
-    if drafts:
-        for title, body in drafts.items():
-            doc.add_heading(title, level=2)
-            add_paragraph_lines(doc, body)
-    else:
-        doc.add_paragraph("No draft sections generated yet.", style="List Bullet")
-
+def chip_color(label: str) -> str:
+    # green/yellow/red
+    if label in ["PASS", S_PASS]:
+        return "#1f7a1f"
+    if label in ["AT RISK", S_UNKNOWN, "GATE NOT RUN"]:
+        return "#b7791f"
+    if label in ["FAIL", S_FAIL]:
+        return "#b91c1c"
+    return "#374151"
+
+
+def render_chip(text: str, color: str):
+    st.markdown(
+        f"""
+        <span style="
+            display:inline-block;
+            padding:6px 10px;
+            border-radius:999px;
+            background:{color}1A;
+            border:1px solid {color}55;
+            color:{color};
+            font-weight:600;
+            font-size:0.9rem;
+            margin-right:8px;">
+            {text}
+        </span>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+# -----------------------------
+# EXPORTS
+# -----------------------------
+def export_checklist_pdf(items: List[Item]) -> bytes:
     buf = io.BytesIO()
-    doc.save(buf)
+    c = canvas.Canvas(buf, pagesize=letter)
+    width, height = letter
+
+    y = height - 50
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(50, y, f"{APP_NAME} – Submission Checklist")
+    y -= 22
+    c.setFont("Helvetica", 10)
+    c.drawString(50, y, f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}")
+    y -= 18
+
+    grouped = {}
+    for it in items:
+        grouped.setdefault(it.bucket, []).append(it)
+
+    for bucket in BUCKETS:
+        if bucket not in grouped:
+            continue
+        c.setFont("Helvetica-Bold", 12)
+        y -= 16
+        if y < 80:
+            c.showPage()
+            y = height - 50
+        c.drawString(50, y, bucket)
+
+        c.setFont("Helvetica", 10)
+        for it in grouped[bucket]:
+            y -= 14
+            if y < 80:
+                c.showPage()
+                y = height - 50
+            status = it.status
+            if it.done and status == S_UNKNOWN:
+                status = "Done"
+            prefix = "[CRITICAL] " if it.is_critical else ""
+            line = f"- {prefix}{it.text}  ({status})"
+            c.drawString(60, y, line[:120])
+
+    c.showPage()
+    c.save()
     return buf.getvalue()
 
 
-# ============================================================
-# Project Save/Load (Full State)
-# ============================================================
-PROJECT_KEYS = [
-    "rfp_text", "rfp_diag", "rules", "forms", "attachments", "amendments", "separate_submit",
-    "required_certs", "sow_snips", "keywords", "drafts", "company", "logo_bytes",
-    "matrix_rows", "deadline_ack", "validation_last", "current_step",
-]
-
-def b64_from_bytes(b: Optional[bytes]) -> Optional[str]:
-    if not b:
-        return None
-    return base64.b64encode(b).decode("utf-8")
-
-def bytes_from_b64(s: Optional[str]) -> Optional[bytes]:
-    if not s:
-        return None
-    try:
-        return base64.b64decode(s.encode("utf-8"))
-    except Exception:
-        return None
-
-def export_project_json() -> str:
-    c: CompanyInfo = st.session_state.company
-    payload = {
-        "build": {"version": BUILD_VERSION, "date": BUILD_DATE},
-        "rfp_text": st.session_state.rfp_text,
-        "rfp_diag": st.session_state.rfp_diag,
-        "rules": st.session_state.rules,
-        "forms": st.session_state.forms,
-        "attachments": st.session_state.attachments,
-        "amendments": st.session_state.amendments,
-        "separate_submit": st.session_state.separate_submit,
-        "required_certs": st.session_state.required_certs,
-        "sow_snips": st.session_state.sow_snips,
-        "keywords": st.session_state.keywords,
-        "drafts": st.session_state.drafts,
-        "company": c.to_dict(),
-        "logo_b64": b64_from_bytes(st.session_state.logo_bytes),
-        "matrix_rows": st.session_state.matrix_rows,
-        "deadline_ack": st.session_state.deadline_ack,
-        "validation_last": st.session_state.validation_last,
-        "current_step": st.session_state.current_step,
-    }
-    return json.dumps(payload, indent=2)
-
-def import_project_json(s: str) -> Tuple[bool, str]:
-    try:
-        payload = json.loads(s)
-        if not isinstance(payload, dict):
-            return False, "Invalid project file."
-
-        st.session_state.rfp_text = payload.get("rfp_text", "") or ""
-        st.session_state.rfp_diag = payload.get("rfp_diag", {}) or {}
-        st.session_state.rules = payload.get("rules", {}) or {}
-        st.session_state.forms = payload.get("forms", []) or []
-        st.session_state.attachments = payload.get("attachments", []) or []
-        st.session_state.amendments = payload.get("amendments", []) or []
-        st.session_state.separate_submit = payload.get("separate_submit", []) or []
-        st.session_state.required_certs = payload.get("required_certs", []) or []
-        st.session_state.sow_snips = payload.get("sow_snips", []) or []
-        st.session_state.keywords = payload.get("keywords", []) or []
-        st.session_state.drafts = payload.get("drafts", {}) or {}
-
-        company_dict = payload.get("company", {}) or {}
-        c = CompanyInfo(certifications=[])
-        for k, v in company_dict.items():
-            if hasattr(c, k):
-                setattr(c, k, v)
-        if c.certifications is None:
-            c.certifications = []
-        st.session_state.company = c
-
-        st.session_state.logo_bytes = bytes_from_b64(payload.get("logo_b64"))
-
-        st.session_state.matrix_rows = payload.get("matrix_rows", []) or []
-        st.session_state.deadline_ack = bool(payload.get("deadline_ack", False))
-        st.session_state.validation_last = payload.get("validation_last", None)
-        st.session_state.current_step = int(payload.get("current_step", 0))
-
-        return True, "Project loaded."
-    except Exception as e:
-        return False, f"Could not load project: {e}"
+def export_matrix_csv(items: List[Item]) -> bytes:
+    df = pd.DataFrame([{
+        "Item ID": it.item_id,
+        "Bucket": it.bucket,
+        "Section": it.section,
+        "Requirement": it.text,
+        "Gating": it.gating_label,
+        "Confidence": it.confidence,
+        "Status": it.status,
+        "Done": it.done,
+        "Critical": it.is_critical,
+        "Notes": it.notes
+    } for it in items])
+    return df.to_csv(index=False).encode("utf-8")
 
 
-# ============================================================
-# Session State Init
-# ============================================================
-if "rfp_text" not in st.session_state: st.session_state.rfp_text = ""
-if "rfp_diag" not in st.session_state: st.session_state.rfp_diag = {}
-if "rules" not in st.session_state: st.session_state.rules = {}
-if "forms" not in st.session_state: st.session_state.forms = []
-if "attachments" not in st.session_state: st.session_state.attachments = []
-if "amendments" not in st.session_state: st.session_state.amendments = []
-if "separate_submit" not in st.session_state: st.session_state.separate_submit = []
-if "required_certs" not in st.session_state: st.session_state.required_certs = []
-if "sow_snips" not in st.session_state: st.session_state.sow_snips = []
-if "keywords" not in st.session_state: st.session_state.keywords = []
-if "drafts" not in st.session_state: st.session_state.drafts = {}
-if "company" not in st.session_state: st.session_state.company = CompanyInfo(certifications=[])
-if "logo_bytes" not in st.session_state: st.session_state.logo_bytes = None
-if "matrix_rows" not in st.session_state: st.session_state.matrix_rows = []
-if "deadline_ack" not in st.session_state: st.session_state.deadline_ack = False
-if "validation_last" not in st.session_state: st.session_state.validation_last = None
-if "current_step" not in st.session_state: st.session_state.current_step = 0
+def export_matrix_xlsx(items: List[Item]) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Compliance Matrix"
+
+    headers = ["Item ID", "Bucket", "Section", "Requirement", "Gating", "Confidence", "Status", "Done", "Critical", "Notes"]
+    ws.append(headers)
+
+    for it in items:
+        ws.append([
+            it.item_id, it.bucket, it.section, it.text, it.gating_label,
+            float(it.confidence), it.status, bool(it.done), bool(it.is_critical), it.notes
+        ])
+
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue()
 
 
-# ============================================================
-# Step Model (Wizard)
-# ============================================================
-STEPS = [
-    {"key": "intake", "title": "Intake"},
-    {"key": "company", "title": "Company"},
-    {"key": "matrix", "title": "Compliance"},
-    {"key": "drafts", "title": "Draft"},
-    {"key": "export", "title": "Export"},
-]
+def export_zip(pdf_bytes: bytes, csv_bytes: bytes, xlsx_bytes: bytes) -> bytes:
+    zbuf = io.BytesIO()
+    with zipfile.ZipFile(zbuf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("01_Submission_Checklist.pdf", pdf_bytes)
+        z.writestr("02_Compliance_Matrix.csv", csv_bytes)
+        z.writestr("03_Compliance_Matrix.xlsx", xlsx_bytes)
+        z.writestr("README.txt", "Export includes only actionable + relevant items.\n")
+    return zbuf.getvalue()
 
 
-def step_done(idx: int) -> bool:
-    # "done" means they have enough to reasonably proceed
-    if idx == 0:
-        return bool(st.session_state.rfp_text.strip())
-    if idx == 1:
-        c: CompanyInfo = st.session_state.company
-        crit, _ = missing_info_alerts(c)
-        return len(crit) == 0
-    if idx == 2:
-        return bool(st.session_state.matrix_rows)
-    if idx == 3:
-        return bool(st.session_state.drafts)
-    if idx == 4:
-        return False
-    return False
-
-
-def render_topbar():
-    active = st.session_state.current_step
+# -----------------------------
+# UI BUILDING BLOCKS
+# -----------------------------
+def header(run_meta: Dict, kpis: Dict):
     st.markdown(
         f"""
-        <div class="topbar">
-          <div class="topbar-title">
-            <div class="brand">Path</div>
-            <div class="build">{BUILD_VERSION} • {BUILD_DATE}</div>
-          </div>
-          <div class="steps">
+        <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0 10px 0;">
+          <div style="font-size:1.8rem; font-weight:800;">{APP_NAME}</div>
+          <div style="color:#6b7280; font-weight:600;">{APP_VERSION} • {datetime.utcnow().strftime('%b %d, %Y')}</div>
+        </div>
         """,
         unsafe_allow_html=True
     )
 
-    for i, s in enumerate(STEPS):
-        cls = "step"
-        if i == active:
-            cls += " active"
-        elif step_done(i):
-            cls += " done"
-        st.markdown(f"""<span class="{cls}">{s['title']}</span>""", unsafe_allow_html=True)
+    # Progress bar (real progress)
+    st.progress(float(kpis["completion"]))
 
-    st.markdown("</div></div>", unsafe_allow_html=True)
-
-
-def nav_buttons(can_next: bool = True, next_label: str = "Next"):
-    col1, col2, col3 = st.columns([1, 6, 1])
+    # KPI chips (color-coded)
+    col1, col2, col3, col4, col5 = st.columns([1.3, 1, 1, 1.2, 1.4])
     with col1:
-        if st.session_state.current_step > 0:
-            if st.button("Back", use_container_width=True):
-                st.session_state.current_step -= 1
-                st.rerun()
+        render_chip(f"Completion: {int(kpis['completion']*100)}%", "#2563eb")
+    with col2:
+        render_chip(f"Pass: {kpis['pass']}", chip_color(S_PASS))
     with col3:
-        if st.session_state.current_step < (len(STEPS) - 1):
-            if st.button(next_label, use_container_width=True, disabled=not can_next):
-                st.session_state.current_step += 1
-                st.rerun()
+        render_chip(f"Fail: {kpis['fail']}", chip_color(S_FAIL))
+    with col4:
+        render_chip(f"Unknown: {kpis['unknown']}", chip_color(S_UNKNOWN))
+    with col5:
+        render_chip(f"Gate: {kpis['gate']}", chip_color(kpis["gate"]))
+
+    if kpis["missing_critical"] > 0:
+        st.warning(f"Missing critical fields: {kpis['missing_critical']} (these are top priority).")
 
 
-# ============================================================
-# Sidebar (minimal + project save/load)
-# ============================================================
-with st.sidebar:
-    st.markdown("### Project")
-    st.download_button(
-        "Download Project (.json)",
-        data=export_project_json(),
-        file_name="path_project.json",
-        mime="application/json",
-        use_container_width=True
-    )
-    up_proj = st.file_uploader("Upload Project (.json)", type=["json"], key="proj_uploader")
-    if up_proj:
-        ok, msg = import_project_json(up_proj.read().decode("utf-8", errors="ignore"))
-        if ok:
-            ui_notice("Project loaded", "Your session has been restored.", tone="good")
+def reference_drawer(items: Dict[str, Item]):
+    info_items = [i for i in items.values() if i.gating_label == GL_INFORMATIONAL]
+    if not info_items:
+        return
+
+    with st.expander("Reference (Informational) — collapsed by default", expanded=False):
+        st.caption("This area is intentionally hidden by default. It’s reference-only (no checkboxes).")
+        q = st.text_input("Search reference", "")
+        src_filter = st.selectbox("Filter by source", ["All"] + sorted(list(set(i.source for i in info_items))))
+        sec_filter = st.selectbox("Filter by section", ["All"] + sorted(list(set(i.section for i in info_items))))
+
+        filtered = info_items
+        if q.strip():
+            filtered = [i for i in filtered if q.lower() in i.text.lower()]
+        if src_filter != "All":
+            filtered = [i for i in filtered if i.source == src_filter]
+        if sec_filter != "All":
+            filtered = [i for i in filtered if i.section == sec_filter]
+
+        for it in filtered:
+            st.markdown(f"**{it.section}** — {it.text}")
+            if it.notes:
+                st.caption(it.notes)
+
+
+def render_task_list(items: Dict[str, Item], run_id: str):
+    st.subheader("Task List (Home Screen)")
+    st.caption("Only ACTIONABLE tasks show here. Everything else is hidden or moved to Reference.")
+
+    actionable = [i for i in items.values() if i.gating_label == GL_ACTIONABLE]
+    if not actionable:
+        st.info("No actionable tasks yet. Go to Intake and paste/upload solicitation text to generate items.")
+        return
+
+    # Smart grouping buckets
+    grouped = {}
+    for it in actionable:
+        grouped.setdefault(it.bucket, []).append(it)
+
+    for bucket in BUCKETS:
+        if bucket not in grouped:
+            continue
+        with st.expander(f"{bucket} ({len(grouped[bucket])})", expanded=(bucket == "Submission & Format")):
+            for it in grouped[bucket]:
+                left, mid, right = st.columns([0.10, 0.70, 0.20])
+                with left:
+                    checked = st.checkbox("", value=it.done, key=f"done_{it.item_id}")
+                with mid:
+                    prefix = "🚩 " if it.is_critical else ""
+                    st.markdown(f"{prefix}**{it.text}**")
+                    if it.notes:
+                        st.caption(it.notes)
+                with right:
+                    status = st.selectbox(
+                        "Status",
+                        [S_UNKNOWN, S_PASS, S_FAIL],
+                        index=[S_UNKNOWN, S_PASS, S_FAIL].index(it.status),
+                        key=f"status_{it.item_id}"
+                    )
+
+                # persist changes
+                it.done = bool(checked)
+                it.status = status
+                upsert_item(run_id, it)
+
+
+def render_compliance(items: Dict[str, Item], run_id: str):
+    st.subheader("Compliance")
+    st.caption("Mark each actionable requirement Pass/Fail/Unknown. This powers gate and export.")
+
+    actionable = [i for i in items.values() if i.gating_label == GL_ACTIONABLE]
+    if not actionable:
+        st.info("No actionable compliance items yet. Add items from Intake first.")
+        return
+
+    df = pd.DataFrame([{
+        "Req ID": it.item_id,
+        "Requirement": it.text,
+        "Bucket": it.bucket,
+        "Critical": "Yes" if it.is_critical else "",
+        "Status": it.status
+    } for it in actionable])
+
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    # Gate check confirmation (kept minimal)
+    st.markdown("---")
+    st.subheader("Gate Check")
+    st.caption("Gate is strict and reads only actionable items.")
+    ack = st.checkbox("I acknowledge the detected submission information is correct (verify in the solicitation).", value=False)
+    if st.button("Run Gate Check", disabled=(not ack)):
+        k = compute_kpis(items)
+        if k["gate"] == "PASS":
+            st.success("Gate: PASS — ready to proceed.")
+        elif k["gate"] == "AT RISK":
+            st.warning("Gate: AT RISK — unknown items still exist.")
         else:
-            ui_notice("Could not load project", msg, tone="bad")
+            st.error("Gate: FAIL — fix fail items before proceeding.")
+
+
+def render_intake(run_id: str, run_meta: Dict, items: Dict[str, Item]):
+    st.subheader("Intake")
+    st.caption("Paste solicitation text (or extracted requirements). We will extract items, clean them, classify relevance, and generate your task list.")
+
+    intake = run_meta.get("intake", {})
+    sol_text = st.text_area("Solicitation / RFP text (paste here)", value=intake.get("sol_text", ""), height=220)
+
+    colA, colB, colC = st.columns([1, 1, 1])
+    with colA:
+        run_name = st.text_input("Proposal run name", value=run_meta.get("name", "My Proposal Run"))
+    with colB:
+        auto_build = st.checkbox("Auto-build tasks now", value=True)
+    with colC:
+        reset = st.button("Reset items (danger)")
+
+    if reset:
+        st.error("Reset removes all items for this run.")
+        confirm = st.checkbox("Yes, delete all items for this run.")
+        if confirm:
+            delete_all_items(run_id)
+            st.success("Items deleted. Refresh the page.")
+            return
+
+    if st.button("Save Intake"):
+        intake["sol_text"] = sol_text
+        save_run_meta(run_id, intake=intake, company=run_meta.get("company", {}))
+        st.success("Saved.")
+
+    if auto_build and st.button("Build / Rebuild Task Items"):
+        if not sol_text.strip():
+            st.warning("Paste solicitation text first.")
+            return
+
+        # Extract raw items
+        extracted = extract_items_from_text(sol_text)
+
+        # Convert to Item objects + classify
+        built: List[Item] = []
+        now = datetime.utcnow().isoformat()
+
+        # Include critical missing-field tasks first
+        crit_tasks = build_missing_critical_tasks(sol_text)
+        built.extend(crit_tasks)
+
+        for idx, (section, raw_req) in enumerate(extracted, start=1):
+            txt = clean_text(raw_req)
+            gating, conf = classify_gating(txt)
+
+            # Always hide irrelevant; auto-resolve silent
+            status = S_UNKNOWN
+            done = False
+            if gating == GL_AUTO:
+                done = True
+                status = S_PASS  # silently resolved
+            if gating == GL_IRRELEVANT:
+                # do not store at all (completely hidden)
+                continue
+
+            item_id = f"R{idx:03d}"
+            bucket = bucketize(txt, section)
+
+            built.append(Item(
+                item_id=item_id,
+                text=txt,
+                source="RFP",
+                section=section,
+                bucket=bucket,
+                gating_label=gating,
+                confidence=float(conf),
+                status=status,
+                done=done,
+                is_critical=detect_critical(txt) or item_id.startswith("CRIT_"),
+                notes="",
+                created_at=now
+            ))
+
+        # Dedupe (reduce noise)
+        built = dedupe_items(built)
+
+        # Save (replace all)
+        delete_all_items(run_id)
+        for it in built:
+            upsert_item(run_id, it)
+
+        st.success(f"Built {len(built)} relevant items. ACTIONABLE tasks are now your only checkboxes.")
+
+
+def render_company(run_id: str, run_meta: Dict):
+    st.subheader("Company")
+    st.caption("Store company info once. Drafting and exports will use this later (AI will plug in here).")
+
+    company = run_meta.get("company", {})
+
+    company["legal_name"] = st.text_input("Legal company name", value=company.get("legal_name", ""))
+    company["uei"] = st.text_input("UEI", value=company.get("uei", ""))
+    company["cage"] = st.text_input("CAGE", value=company.get("cage", ""))
+    company["naics"] = st.text_input("Primary NAICS", value=company.get("naics", ""))
+    company["address"] = st.text_area("Company address", value=company.get("address", ""), height=80)
+    company["point_of_contact"] = st.text_input("Point of Contact", value=company.get("point_of_contact", ""))
+    company["email"] = st.text_input("Email", value=company.get("email", ""))
+    company["phone"] = st.text_input("Phone", value=company.get("phone", ""))
+
+    if st.button("Save Company"):
+        save_run_meta(run_id, intake=run_meta.get("intake", {}), company=company)
+        st.success("Company info saved.")
+
+
+def render_draft(run_id: str, run_meta: Dict, items: Dict[str, Item]):
+    st.subheader("Draft")
+    st.caption("This is where AI drafting will plug in. For now, we provide a clean outline from actionable buckets.")
+
+    actionable = [i for i in items.values() if i.gating_label == GL_ACTIONABLE]
+    if not actionable:
+        st.info("No actionable items yet. Build items in Intake first.")
+        return
+
+    grouped = {}
+    for it in actionable:
+        grouped.setdefault(it.bucket, []).append(it)
+
+    st.markdown("### Draft Outline (based on actionable tasks)")
+    for bucket in BUCKETS:
+        if bucket not in grouped:
+            continue
+        with st.expander(bucket, expanded=(bucket == "Volume I – Technical")):
+            for it in grouped[bucket]:
+                st.markdown(f"- {it.text}")
 
     st.markdown("---")
-    advanced = st.toggle("Show advanced panels", value=False)
-    st.caption("Advanced panels stay hidden unless needed.")
-
-
-# ============================================================
-# Main UI
-# ============================================================
-render_topbar()
-step = st.session_state.current_step
-
-
-# ------------------------------------------------------------
-# STEP 1: Intake
-# ------------------------------------------------------------
-if step == 0:
-    st.markdown("## Intake")
-    st.caption("Upload or paste the solicitation. Then click Analyze.")
-
-    uploaded = st.file_uploader("Upload RFP (PDF, DOCX, TXT)", type=["pdf", "docx", "txt"])
-    pasted = st.text_area("Or paste text (Section L/M recommended)", value=st.session_state.rfp_text, height=260)
-
-    colA, colB = st.columns([1, 1])
-    with colA:
-        if st.button("Analyze", use_container_width=True):
-            text = ""
-            diag = {}
-
-            if uploaded:
-                text, diag = read_uploaded_file(uploaded)
-                st.session_state.rfp_diag = diag
-
-            if pasted.strip():
-                text = pasted.strip()
-
-            if not text.strip():
-                ui_notice("Input required", "Upload a readable file OR paste text.", tone="bad")
-            else:
-                st.session_state.rfp_text = text
-
-                rules = detect_submission_rules(text)
-                rules = refine_due_date_rule(text, rules)
-                st.session_state.rules = rules
-
-                st.session_state.forms = find_forms(text)
-                st.session_state.attachments = find_attachment_lines(text)
-                st.session_state.amendments = detect_amendment_lines(text)
-                st.session_state.separate_submit = detect_separate_submit_lines(text)
-                st.session_state.sow_snips = extract_sow_snippets(text)
-                st.session_state.keywords = derive_tailor_keywords(st.session_state.sow_snips)
-                st.session_state.required_certs = detect_required_certifications(text)
-
-                extracted = extract_requirements_v2(text)
-                matrix_rows = []
-                for r in extracted:
-                    matrix_rows.append({
-                        "id": r["id"],
-                        "requirement": r["requirement"],
-                        "section": auto_map_section(r["requirement"]),
-                        "status": "Unknown",
-                        "notes": "",
-                    })
-                st.session_state.matrix_rows = matrix_rows
-
-                st.session_state.validation_last = None
-                ui_notice("Analysis complete", "Move to Company next.", tone="good")
-
-    with colB:
-        diag = st.session_state.rfp_diag or {}
-        if diag.get("likely_scanned"):
-            ui_notice("Scanned PDF detected", "If requirements are missing, paste Section L/M text.", tone="warn")
-
-        # Quick summary card
-        rules = st.session_state.rules or {}
-        forms = st.session_state.forms or []
-        amends = st.session_state.amendments or []
-        attaches = st.session_state.attachments or []
-        reqs = st.session_state.matrix_rows or []
-
-        st.markdown(
-            f"""
-            <div class="card">
-              <div class="card-title">What we found</div>
-              <div class="muted">This is auto-detected. You still verify the solicitation.</div>
-              <div class="divider"></div>
-              <b>Requirements extracted:</b> {len(reqs)}<br/>
-              <b>Submission rules:</b> {len(rules)} categories<br/>
-              <b>Forms:</b> {len(forms)}<br/>
-              <b>Attachments mentions:</b> {len(attaches)}<br/>
-              <b>Amendments mentions:</b> {len(amends)}<br/>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-    nav_buttons(can_next=bool(st.session_state.rfp_text.strip()), next_label="Next")
-
-
-# ------------------------------------------------------------
-# STEP 2: Company
-# ------------------------------------------------------------
-elif step == 1:
-    st.markdown("## Company")
-    st.caption("This auto-fills your drafts and export package. Fill it once and reuse forever.")
-
-    c: CompanyInfo = st.session_state.company
-
-    st.markdown("### Logo (optional)")
-    logo = st.file_uploader("Upload logo (PNG/JPG)", type=["png", "jpg", "jpeg"])
-    if logo:
-        st.session_state.logo_bytes = logo.read()
-        ui_notice("Logo saved", "It will be placed on the title page.", tone="good")
-        st.image(st.session_state.logo_bytes, width=160)
-
-    st.markdown("### Proposal title page")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        c.proposal_title = st.text_input("Proposal/Contract Title", value=c.proposal_title, placeholder="e.g., IT Support Services")
-    with col2:
-        c.solicitation_number = st.text_input("Solicitation Number", value=c.solicitation_number, placeholder="e.g., W91XXX-26-R-0001")
-    with col3:
-        c.agency_customer = st.text_input("Agency/Customer", value=c.agency_customer, placeholder="e.g., Department of X")
-
-    st.markdown("### Company basics")
-    colA, colB = st.columns(2)
-    with colA:
-        c.legal_name = st.text_input("Legal Company Name", value=c.legal_name)
-        c.uei = st.text_input("UEI", value=c.uei)
-        c.cage = st.text_input("CAGE (optional)", value=c.cage)
-        c.naics = st.text_input("Primary NAICS (optional)", value=c.naics)
-        c.psc = st.text_input("PSC (optional)", value=c.psc)
-    with colB:
-        c.address = st.text_area("Business Address", value=c.address, height=110)
-        c.poc_name = st.text_input("Point of Contact Name", value=c.poc_name)
-        c.poc_email = st.text_input("Point of Contact Email", value=c.poc_email)
-        c.poc_phone = st.text_input("Point of Contact Phone", value=c.poc_phone)
-        c.website = st.text_input("Website (optional)", value=c.website)
-
-    st.markdown("### Certifications / Set-Asides")
-    options = ["SDVOSB", "VOSB", "8(a)", "WOSB/EDWOSB", "HUBZone", "SBA Small Business", "ISO 9001", "None"]
-    c.certifications = st.multiselect("Select all that apply", options=options, default=c.certifications or [])
-
-    st.markdown("### Capabilities")
-    c.capabilities = st.text_area("Capabilities (bullets or short paragraph)", value=c.capabilities, height=120)
-    c.differentiators = st.text_area("Differentiators (why you win)", value=c.differentiators, height=100)
-
-    st.markdown("### Past Performance (optional)")
-    c.past_performance = st.text_area("Paste past performance notes", value=c.past_performance, height=140)
-
-    st.markdown("### Signature block (optional)")
-    st.caption("Leave blank to default to POC/company. No DocuSign/wet ink language.")
-    colS1, colS2 = st.columns(2)
-    with colS1:
-        c.signer_name = st.text_input("Signer Name", value=c.signer_name)
-        c.signer_title = st.text_input("Signer Title", value=c.signer_title)
-        c.signer_company = st.text_input("Signer Company", value=c.signer_company)
-    with colS2:
-        c.signer_phone = st.text_input("Signer Phone", value=c.signer_phone)
-        c.signer_email = st.text_input("Signer Email", value=c.signer_email)
-
-    st.session_state.company = c
-
-    crit, rec = missing_info_alerts(c)
-    if crit:
-        ui_notice("Missing required fields", "Fix these before continuing: " + " • ".join(crit), tone="bad")
-    else:
-        ui_notice("Required fields complete", "You’re good to move forward.", tone="good")
-
-    if rec and advanced:
-        with st.expander("Recommended improvements", expanded=False):
-            for x in rec:
-                ui_notice("Recommendation", x, tone="warn")
-
-    nav_buttons(can_next=(len(crit) == 0), next_label="Next")
-
-
-# ------------------------------------------------------------
-# STEP 3: Compliance Matrix
-# ------------------------------------------------------------
-elif step == 2:
-    st.markdown("## Compliance")
-    st.caption("Mark each extracted requirement Pass/Fail/Unknown. This powers the gate and export.")
-
-    if not st.session_state.rfp_text.strip():
-        ui_notice("Missing intake", "Go back to Intake and Analyze first.", tone="warn")
-        nav_buttons(can_next=False)
-        st.stop()
-
-    matrix_rows = st.session_state.matrix_rows or []
-    if not matrix_rows:
-        ui_notice("No requirements extracted", "Paste Section L/M and re-run Analyze in Intake.", tone="warn")
-        nav_buttons(can_next=False)
-        st.stop()
-
-    # KPIs
-    k = compute_matrix_kpis(matrix_rows)
-    total = max(1, k["total"])
-    compliance_pct = int(round((k["pass"] / total) * 100))
-    st.markdown(
-        f"""
-        <div class="card">
-          <div class="card-title">Compliance KPI</div>
-          <div class="muted">Goal: drive Unknown to zero, and Fail to zero.</div>
-          <div class="divider"></div>
-          <b>Compliance:</b> {compliance_pct}% &nbsp; • &nbsp;
-          <b>Pass:</b> {k["pass"]} &nbsp; • &nbsp;
-          <b>Fail:</b> {k["fail"]} &nbsp; • &nbsp;
-          <b>Unknown:</b> {k["unknown"]}
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    # Data editor (clean)
-    section_options = DEFAULT_SECTIONS.copy()
-    # If drafts contain extra sections, allow mapping to them later
-    for kname in (st.session_state.drafts or {}).keys():
-        if kname not in section_options:
-            section_options.append(kname)
-
-    # build a display table
-    display_rows = []
-    for r in matrix_rows:
-        display_rows.append({
-            "Req ID": r.get("id",""),
-            "Requirement": r.get("requirement",""),
-            "Section": r.get("section","Technical Approach"),
-            "Status": r.get("status","Unknown"),
-            "Notes": r.get("notes",""),
-        })
-
-    edited = st.data_editor(
-        display_rows,
-        use_container_width=True,
-        num_rows="fixed",
-        column_config={
-            "Req ID": st.column_config.TextColumn(disabled=True),
-            "Requirement": st.column_config.TextColumn(width="large", disabled=True),
-            "Section": st.column_config.SelectboxColumn(options=section_options),
-            "Status": st.column_config.SelectboxColumn(options=["Pass", "Fail", "Unknown"]),
-            "Notes": st.column_config.TextColumn(width="medium"),
-        },
-        height=520
-    )
-
-    # persist edits
-    new_matrix = []
-    for row in edited:
-        new_matrix.append({
-            "id": row["Req ID"],
-            "requirement": row["Requirement"],
-            "section": row["Section"],
-            "status": row["Status"],
-            "notes": row["Notes"],
-        })
-    st.session_state.matrix_rows = new_matrix
-
-    # Gate preview (simple)
-    rules = st.session_state.rules or {}
-    deadline_detected = bool(rules.get("Due Date/Deadline"))
-    if deadline_detected:
-        st.session_state.deadline_ack = st.checkbox(
-            "I acknowledge the detected submission deadline is correct (verify the solicitation).",
-            value=st.session_state.deadline_ack
-        )
-
-    if st.button("Run Gate Check", use_container_width=True):
-        st.session_state.validation_last = run_pre_submit_gate(
-            company=st.session_state.company,
-            rules=rules,
-            matrix_rows=st.session_state.matrix_rows,
-            deadline_acknowledged=st.session_state.deadline_ack
-        )
-
-    vr = st.session_state.validation_last
-    if vr:
-        if vr["level"] == "blocked":
-            ui_notice("Gate: NOT COMPLIANT", "Fix Fail items and/or missing required company fields.", tone="bad")
-        elif vr["level"] == "risk":
-            ui_notice("Gate: AT RISK", "You can proceed, but Unknown items still exist.", tone="warn")
-        else:
-            ui_notice("Gate: READY", "You’re in a good position to generate drafts.", tone="good")
-
-    nav_buttons(can_next=True, next_label="Next")
-
-
-# ------------------------------------------------------------
-# STEP 4: Drafts
-# ------------------------------------------------------------
-elif step == 3:
-    st.markdown("## Draft")
-    st.caption("Generate draft proposal sections from what we detected. Then export.")
-
-    if not st.session_state.rfp_text.strip():
-        ui_notice("Missing intake", "Go back to Intake and Analyze first.", tone="warn")
-        nav_buttons(can_next=False)
-        st.stop()
-
-    c: CompanyInfo = st.session_state.company
-    rules = st.session_state.rules or {}
-    forms = st.session_state.forms or []
-    attachments = st.session_state.attachments or []
-    amendments = st.session_state.amendments or []
-    separate = st.session_state.separate_submit or []
-    req_certs = st.session_state.required_certs or []
-    kws = st.session_state.keywords or []
-
-    # Show only relevant “detected issues”
-    warns = compliance_warnings(rules, forms, amendments, separate)
-    crit, rec = missing_info_alerts(c)
-
-    if crit:
-        ui_notice("Missing required fields", "Go back to Company and fill required fields.", tone="bad")
-
-    # Detected facts (relevant)
-    facts = []
-    if rules.get("Due Date/Deadline"):
-        facts.append("Deadline detected")
-    if rules.get("Submission Method"):
-        facts.append("Submission method detected")
-    if forms:
-        facts.append(f"{len(forms)} forms detected")
-    if attachments:
-        facts.append(f"{len(attachments)} attachment mentions")
-    if amendments:
-        facts.append(f"{len(amendments)} amendment mentions")
-    if separate:
-        facts.append("separate submissions indicated")
-    if req_certs:
-        facts.append("certification language detected")
-
-    st.markdown(
-        f"""
-        <div class="card">
-          <div class="card-title">What matters right now</div>
-          <div class="muted">Only showing items that impact compliance and proposal quality.</div>
-          <div class="divider"></div>
-          {"<br/>".join([f"• {x}" for x in facts]) if facts else "No major items detected yet."}
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    # Warnings (show top 3 unless advanced)
-    if warns:
-        if advanced:
-            with st.expander("Detected risks (advanced)", expanded=False):
-                for w in warns:
-                    ui_notice("Risk", w, tone="warn")
-        else:
-            for w in warns[:3]:
-                ui_notice("Risk", w, tone="warn")
-
-    st.caption("Tailoring keywords (auto): " + (", ".join(kws[:10]) if kws else "None detected"))
-
-    if st.button("Generate Draft Sections", use_container_width=True, disabled=bool(crit)):
-        st.session_state.drafts = generate_drafts(
-            sow_snips=st.session_state.sow_snips or [],
-            keywords=kws,
-            rules=rules,
-            forms=forms,
-            attachments=attachments,
-            company=c
-        )
-        ui_notice("Drafts generated", "Review quickly, then export.", tone="good")
-
-    drafts = st.session_state.drafts or {}
-    if drafts:
-        with st.expander("Review drafts", expanded=True):
-            for title, body in drafts.items():
-                st.markdown(f"### {title}")
-                st.text_area(label="", value=body, height=240)
-                st.markdown("---")
-    else:
-        ui_notice("No drafts yet", "Generate drafts to unlock export.", tone="warn")
-
-    nav_buttons(can_next=bool(st.session_state.drafts), next_label="Next")
-
-
-# ------------------------------------------------------------
-# STEP 5: Export
-# ------------------------------------------------------------
-else:
-    st.markdown("## Export")
-    st.caption("Run the gate check, then download the full Word package.")
-
-    c: CompanyInfo = st.session_state.company
-    rules = st.session_state.rules or {}
-    forms = st.session_state.forms or []
-    attachments = st.session_state.attachments or []
-    amendments = st.session_state.amendments or []
-    separate = st.session_state.separate_submit or []
-    diag = st.session_state.rfp_diag or {}
-    drafts = st.session_state.drafts or {}
-    matrix_rows = st.session_state.matrix_rows or []
-
-    # Gate is required before export (professional behavior)
-    if st.button("Run Gate Check", use_container_width=True):
-        st.session_state.validation_last = run_pre_submit_gate(
-            company=c,
-            rules=rules,
-            matrix_rows=matrix_rows,
-            deadline_acknowledged=st.session_state.deadline_ack
-        )
-
-    vr = st.session_state.validation_last
-    if not drafts:
-        ui_notice("Drafts required", "Go to Draft and generate drafts to export.", tone="bad")
-        nav_buttons(can_next=False)
-        st.stop()
-
-    if not vr:
-        ui_notice("Gate not run", "Run the gate check before exporting.", tone="warn")
-        nav_buttons(can_next=False)
-        st.stop()
-
-    if vr.get("level") == "blocked":
-        ui_notice("Export locked", "Gate is NOT COMPLIANT. Fix Fail items and required company fields.", tone="bad")
-        if advanced:
-            with st.expander("Details (advanced)", expanded=False):
-                for r in vr.get("blocked_reasons", []):
-                    st.write("•", r)
-                for r in vr.get("risk_reasons", []):
-                    st.write("•", r)
-        nav_buttons(can_next=False)
-        st.stop()
-
-    if vr.get("level") == "risk":
-        ui_notice("Export allowed (At Risk)", "You can export, but Unknown items remain. Best practice: drive Unknown to zero.", tone="warn")
-    else:
-        ui_notice("Export ready", "Gate passed. Download your Word package.", tone="good")
-
-    warns = compliance_warnings(rules, forms, amendments, separate)
-
-    doc_bytes = build_proposal_docx_bytes(
-        company=c,
-        logo_bytes=st.session_state.logo_bytes,
-        rfp_diag=diag,
-        rules=rules,
-        forms=forms,
-        attachments=attachments,
-        amendments=amendments,
-        separate=separate,
-        warnings=warns,
-        matrix_rows=matrix_rows,
-        drafts=drafts,
-        validation_result=vr,
+    st.info("AI Drafting comes next: button-per-section to generate technical approach, compliance narratives, and matrices.")
+
+
+def render_export(run_id: str, run_meta: Dict, items: Dict[str, Item]):
+    st.subheader("Export")
+    st.caption("Exports include only what’s relevant. We export actionable tasks and statuses.")
+
+    actionable = [i for i in items.values() if i.gating_label == GL_ACTIONABLE]
+    if not actionable:
+        st.info("No actionable items to export yet.")
+        return
+
+    # Only export relevant/actionable content
+    pdf_bytes = export_checklist_pdf(actionable)
+    csv_bytes = export_matrix_csv(actionable)
+    xlsx_bytes = export_matrix_xlsx(actionable)
+    zip_bytes = export_zip(pdf_bytes, csv_bytes, xlsx_bytes)
+
+    st.download_button(
+        "Download Submission Checklist PDF",
+        data=pdf_bytes,
+        file_name="Submission_Checklist.pdf",
+        mime="application/pdf"
     )
 
     st.download_button(
-        label="Download Proposal Package (.docx)",
-        data=doc_bytes,
-        file_name="proposal_package.docx",
-        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        use_container_width=True
+        "Download Compliance Matrix CSV",
+        data=csv_bytes,
+        file_name="Compliance_Matrix.csv",
+        mime="text/csv"
     )
 
-    st.caption("In Word: right-click the Table of Contents → Update Field → Update entire table.")
+    st.download_button(
+        "Download Compliance Matrix XLSX",
+        data=xlsx_bytes,
+        file_name="Compliance_Matrix.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
-    nav_buttons(can_next=False)
+    st.download_button(
+        "Download FULL Export Package (ZIP)",
+        data=zip_bytes,
+        file_name="Export_Package.zip",
+        mime="application/zip"
+    )
+
+
+# -----------------------------
+# MAIN APP
+# -----------------------------
+st.set_page_config(page_title="Path", layout="wide")
+
+# Minimal CSS polish
+st.markdown("""
+<style>
+/* Cleaner typography */
+html, body, [class*="css"]  {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# Run selector (persistence)
+with st.sidebar:
+    st.markdown("## Proposal Runs")
+    runs = list_runs()
+
+    if "active_run_id" not in st.session_state:
+        st.session_state.active_run_id = None
+
+    if st.button("➕ New run"):
+        new_name = f"My Proposal Run ({datetime.utcnow().strftime('%Y-%m-%d')})"
+        rid = create_run(new_name)
+        st.session_state.active_run_id = rid
+        st.success("Created new run.")
+
+    run_options = ["(Select a run)"] + [f"{name} — {rid}" for rid, name, _ in runs]
+    sel = st.selectbox("Select run", run_options, index=0)
+
+    if sel != "(Select a run)":
+        rid = sel.split("—")[-1].strip()
+        st.session_state.active_run_id = rid
+
+    st.markdown("---")
+    st.caption("Only actionable tasks are interactive. Informational content is hidden in Reference by default.")
+
+run_id = st.session_state.active_run_id
+if not run_id:
+    st.title("Path")
+    st.info("Create or select a proposal run from the left sidebar to begin.")
+    st.stop()
+
+run_meta = load_run_meta(run_id)
+items = load_items(run_id)
+
+# Compute KPIs always
+kpis = compute_kpis(items)
+
+# Header + KPIs + progress
+header(run_meta, kpis)
+
+# Horizontal nav (tabs)
+tabs = st.tabs(PAGES)
+
+with tabs[0]:
+    render_task_list(items, run_id)
+    reference_drawer(items)
+
+with tabs[1]:
+    render_intake(run_id, run_meta, items)
+
+with tabs[2]:
+    render_company(run_id, run_meta)
+
+with tabs[3]:
+    # refresh items after potential intake rebuild
+    items = load_items(run_id)
+    render_compliance(items, run_id)
+    reference_drawer(items)
+
+with tabs[4]:
+    items = load_items(run_id)
+    render_draft(run_id, run_meta, items)
+
+with tabs[5]:
+    items = load_items(run_id)
+    render_export(run_id, run_meta, items)
