@@ -1,119 +1,56 @@
 from __future__ import annotations
 
-from typing import Dict, Any, List
 import streamlit as st
 
 
-# -----------------------------
-# Notices
-# -----------------------------
-
-def ui_notice(msg: str, kind: str = "info") -> None:
-    kind = (kind or "info").lower().strip()
-    if kind == "success":
-        st.success(msg)
-    elif kind == "warning":
-        st.warning(msg)
-    elif kind == "error":
-        st.error(msg)
-    else:
-        st.info(msg)
+def badge(text: str) -> None:
+    st.markdown(f"<span class='path-badge'>{text}</span>", unsafe_allow_html=True)
 
 
-# -----------------------------
-# Sidebar Progress
-# -----------------------------
-
-def render_sidebar_progress() -> None:
-    st.sidebar.markdown("## Path.AI Progress")
-    st.sidebar.caption("Green = complete • Orange = in progress • Red = not started")
-
-    steps = st.session_state.get("steps", {}) or {}
-
-    def badge(label: str, status: str) -> None:
-        status = (status or "red").lower()
-        dot = {"green": "🟢", "orange": "🟠", "red": "🔴"}.get(status, "🔴")
-        st.sidebar.write(f"{dot} {label}")
-
-    badge("Upload RFP", (steps.get("home", {}) or {}).get("status", "red"))
-    badge("Company Info", (steps.get("company", {}) or {}).get("status", "red"))
-    badge("Draft Proposal", (steps.get("draft", {}) or {}).get("status", "red"))
-    badge("Compatibility", (steps.get("compat", {}) or {}).get("status", "red"))
-    badge("Export", (steps.get("export", {}) or {}).get("status", "red"))
-
-    st.sidebar.markdown("---")
-
-    has_key = bool(st.secrets.get("OPENAI_API_KEY", ""))
-    st.sidebar.caption(f"AI: {'enabled' if has_key else 'not detected'}")
+def warn_box(text: str) -> None:
+    st.markdown(f"<div class='path-warn'>{text}</div>", unsafe_allow_html=True)
 
 
-# -----------------------------
-# Certifications Dropdown
-# -----------------------------
-
-def certification_options() -> List[str]:
-    return [
-        "SDVOSB (Service-Disabled Veteran-Owned Small Business)",
-        "VOSB (Veteran-Owned Small Business)",
-        "8(a)",
-        "HUBZone",
-        "WOSB (Women-Owned Small Business)",
-        "EDWOSB (Economically Disadvantaged WOSB)",
-        "Small Disadvantaged Business (SDB)",
-        "Minority-Owned Business",
-        "Native American-Owned Business",
-        "Alaska Native-Owned Business",
-        "Tribal-Owned Business",
-        "AbilityOne",
-        "ISO 9001",
-        "ISO 27001",
-        "CMMI",
-        "SOC 2",
-        "FedRAMP",
-        "None",
-    ]
+def ok_box(text: str) -> None:
+    st.markdown(f"<div class='path-ok'>{text}</div>", unsafe_allow_html=True)
 
 
-# -----------------------------
-# Readiness Console
-# -----------------------------
+def danger_box(text: str) -> None:
+    st.markdown(f"<div class='path-danger'>{text}</div>", unsafe_allow_html=True)
 
-def render_readiness_console(scores: Dict[str, Any] | None = None) -> None:
-    scores = scores or {}
 
-    def clamp(v):
-        try:
-            return max(0, min(100, float(v)))
-        except Exception:
-            return 0
+def walking_progress(label: str, pct: int, subtitle: str = "") -> None:
+    """
+    A simple “walking man” indicator along a bar.
+    Streamlit-safe (no JS). Uses HTML/CSS only.
+    """
+    pct = max(0, min(100, int(pct)))
 
-    compliance = clamp(scores.get("compliance", 0))
-    company = clamp(scores.get("company", 0))
-    win = clamp(scores.get("win", 0))
+    # Place the walker roughly at pct% but keep within edges
+    left = max(0, min(96, pct))
 
-    overall = (compliance + company + win) / 3
+    st.markdown(
+        f"""
+        <div style="margin: 0.35rem 0 0.2rem 0;">
+          <div style="display:flex; justify-content:space-between; align-items:flex-end;">
+            <div style="font-weight:700;">{label}</div>
+            <div style="opacity:0.85;">{pct}%</div>
+          </div>
+          <div style="position:relative; height:14px; border-radius:999px; background:rgba(255,255,255,0.10); overflow:hidden; margin-top:0.35rem;">
+            <div style="height:14px; width:{pct}%; background:rgba(34,197,94,0.35);"></div>
+            <div style="position:absolute; top:-10px; left:{left}%; transform:translateX(-50%); font-size:18px;">🚶‍♂️</div>
+          </div>
+          <div style="opacity:0.75; font-size:0.9rem; margin-top:0.25rem;">{subtitle}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    def grade(p):
-        if p >= 90: return "A"
-        if p >= 80: return "B"
-        if p >= 70: return "C"
-        if p >= 60: return "D"
-        return "F"
 
-    st.markdown("## Readiness Console")
-    st.caption("Live proposal strength indicators")
-
-    c1, c2 = st.columns([3, 1])
-    with c2:
-        st.markdown(f"### {int(overall)}% • Grade {grade(overall)}")
-
-    st.markdown("**COMPLIANCE**")
-    st.progress(compliance / 100)
-
-    st.markdown("**COMPANY PROFILE**")
-    st.progress(company / 100)
-
-    st.markdown("**WIN STRENGTH**")
-    st.progress(win / 100)
-
-    st.markdown("---")
+def section_header(title: str, hint: str = "") -> None:
+    cols = st.columns([3, 2])
+    with cols[0]:
+        st.subheader(title)
+    with cols[1]:
+        if hint:
+            st.markdown(f"<div class='path-muted' style='text-align:right; padding-top:0.25rem;'>{hint}</div>", unsafe_allow_html=True)
