@@ -1,70 +1,89 @@
+from __future__ import annotations
+
 import streamlit as st
-from ui.components import get_certifications_list
+
+from core.state import get_company, set_company, CompanyProfile, get_rfp, set_current_step
+from core.scoring import compute_all_scores
+from ui.components import section_header, warn_box, ok_box
 
 
-def page_company():
+CERT_OPTIONS = [
+    "SDVOSB",
+    "VOSB",
+    "8(a)",
+    "WOSB",
+    "EDWOSB",
+    "HUBZone",
+    "Small Business",
+    "Other",
+]
+
+
+def render() -> None:
+    rfp = get_rfp()
+    company = get_company()
+
     st.title("Company Info")
-    st.caption("This data powers eligibility checks, cover page, cover letter, and proposal drafting.")
+    st.markdown("<div class='path-muted'>This powers eligibility checks, cover page branding, and proposal tailoring.</div>", unsafe_allow_html=True)
 
-    c = st.session_state["company"]
+    section_header("Company Profile", "Step 3 of 6")
 
-    st.subheader("Identity")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        c["legal_name"] = st.text_input("Legal Company Name", c.get("legal_name", ""))
-        c["doing_business_as"] = st.text_input("DBA (if any)", c.get("doing_business_as", ""))
-        c["website"] = st.text_input("Website", c.get("website", ""))
-    with col2:
-        c["uei"] = st.text_input("UEI", c.get("uei", ""))
-        c["cage"] = st.text_input("CAGE", c.get("cage", ""))
-        c["duns"] = st.text_input("DUNS (if used)", c.get("duns", ""))
-    with col3:
-        c["ein"] = st.text_input("EIN", c.get("ein", ""))
-        c["naics_codes"] = st.text_input("NAICS Codes (comma-separated)", c.get("naics_codes", ""))
-        c["phone"] = st.text_input("Main Phone", c.get("phone", ""))
+    with st.form("company_form", clear_on_submit=False):
+        name = st.text_input("Company name", value=company.name)
+        col1, col2 = st.columns(2)
+        with col1:
+            uei = st.text_input("UEI", value=company.uei)
+        with col2:
+            cage = st.text_input("CAGE", value=company.cage)
 
-    st.subheader("Address")
-    a1, a2 = st.columns(2)
-    with a1:
-        c["address_line1"] = st.text_input("Address Line 1", c.get("address_line1", ""))
-        c["address_line2"] = st.text_input("Address Line 2", c.get("address_line2", ""))
-    with a2:
-        c3, c4, c5 = st.columns(3)
-        with c3:
-            c["city"] = st.text_input("City", c.get("city", ""))
-        with c4:
-            c["state"] = st.text_input("State", c.get("state", ""))
-        with c5:
-            c["zip"] = st.text_input("ZIP", c.get("zip", ""))
-        c["country"] = st.text_input("Country", c.get("country", "USA"))
+        address = st.text_area("Address", value=company.address, height=80)
+        naics = st.text_input("Primary NAICS", value=company.naics)
 
-    st.subheader("Certifications / Set-Asides")
-    certs = get_certifications_list()
-    c["certifications"] = st.multiselect(
-        "Select all that apply",
-        options=certs,
-        default=c.get("certifications", ["None / Not sure"]),
-    )
+        certifications = st.multiselect("Certifications", options=CERT_OPTIONS, default=company.certifications or [])
 
-    st.subheader("Primary Point of Contact")
-    p1, p2, p3 = st.columns(3)
-    with p1:
-        c["primary_poc_name"] = st.text_input("POC Name", c.get("primary_poc_name", ""))
-        c["primary_poc_title"] = st.text_input("POC Title", c.get("primary_poc_title", ""))
-    with p2:
-        c["primary_poc_email"] = st.text_input("POC Email", c.get("primary_poc_email", ""))
-        c["primary_poc_phone"] = st.text_input("POC Phone", c.get("primary_poc_phone", ""))
-    with p3:
-        c["capability_statement"] = st.text_area("1–2 sentence capability statement", c.get("capability_statement", ""), height=90)
+        differentiators = st.text_area("Differentiators (what makes you stand out)", value=company.differentiators, height=120)
+        past_performance = st.text_area("Past performance (brief)", value=company.past_performance, height=120)
 
-    st.subheader("Cover Page Branding")
-    logo = st.file_uploader("Upload Company Logo (PNG/JPG)", type=["png", "jpg", "jpeg"])
-    if logo is not None:
-        c["logo_bytes"] = logo.read()
-        c["logo_name"] = logo.name
-        st.success("Logo saved for cover page / export.")
+        logo = st.file_uploader("Company logo (PNG/JPG)", type=["png", "jpg", "jpeg"])
+        logo_bytes = company.logo_bytes
+        logo_mime = company.logo_mime
 
-    if c.get("logo_bytes"):
-        st.image(c["logo_bytes"], caption=c.get("logo_name", "logo"), use_container_width=True)
+        if logo is not None:
+            logo_bytes = logo.getvalue()
+            logo_mime = logo.type or ""
 
-    st.session_state["company"] = c
+        saved = st.form_submit_button("Save Company Info", type="primary")
+
+    if saved:
+        updated = CompanyProfile(
+            name=name.strip(),
+            uei=uei.strip(),
+            cage=cage.strip(),
+            address=address.strip(),
+            naics=naics.strip(),
+            certifications=certifications,
+            differentiators=differentiators.strip(),
+            past_performance=past_performance.strip(),
+            logo_bytes=logo_bytes,
+            logo_mime=logo_mime,
+        )
+        set_company(updated)
+        compute_all_scores()
+        st.success("Saved.")
+
+    # Eligibility warnings (warnings only, never blocks)
+    scores = compute_all_scores()
+    flags = st.session_state.get("eligibility_flags", []) or []
+    if flags:
+        warn_box("<br/>".join(flags))
+    else:
+        ok_box("No eligibility warnings detected so far.")
+
+    # Show RFP’s detected certification mentions, if any
+    if rfp.certifications_required:
+        st.markdown(f"**RFP mentions certifications:** {', '.join(rfp.certifications_required)}")
+
+    st.write("")
+    if st.button("Continue to Draft Proposal", type="primary", use_container_width=True):
+        set_current_step("draft")
+        st.rerun()
