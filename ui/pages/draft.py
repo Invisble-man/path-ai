@@ -1,91 +1,70 @@
+from __future__ import annotations
+
 import streamlit as st
-from core.ai import ai_build_draft_package, ai_recommend_fixes
+
+from core.scoring import compute_scores
+from ui.components import ui_notice
 
 
 def page_draft():
-    st.title("Draft Proposal")
     ss = st.session_state
 
-    if not ss.get("analyzed"):
-        st.warning("Analyze an RFP first.")
-        return
+    st.markdown("## Draft Proposal")
+    st.caption("Build your cover page, outline, and narrative. Path.ai scores and flags issues inline.")
 
-    rfp_text = ss.get("rfp_text", "")
-    rfp_meta = ss.get("rfp_meta", {})
-    company = ss.get("company", {})
-    draft = ss.get("draft", {})
+    # Compute live scores
+    scores = compute_scores(ss)
 
-    st.markdown("### AI Sync (RFP + Company → Draft)")
-    st.caption("This generates your cover page fields, cover letter, and a clean outline. You can edit everything after.")
+    # --- Eligibility + compliance warnings (inline, not blocking) ---
+    warnings = scores.get("warnings", []) or []
+    for w in warnings:
+        st.warning(w)
 
-    if st.button("AI: Build Draft Package", use_container_width=True):
-        try:
-            ss["last_ai_error"] = ""
-            out = ai_build_draft_package(rfp_text, rfp_meta, company)
+    draft = ss.get("draft", {}) or {}
+    company = ss.get("company", {}) or {}
 
-            # cover page
-            cp = draft.get("cover_page", {})
-            cp.update(out.get("cover_page", {}))
-            # ensure company data is set
-            cp["offeror_name"] = company.get("legal_name", "") or cp.get("offeror_name", "")
-            cp["poc_name"] = company.get("primary_poc_name", "") or cp.get("poc_name", "")
-            cp["poc_email"] = company.get("primary_poc_email", "") or cp.get("poc_email", "")
-            cp["poc_phone"] = company.get("primary_poc_phone", "") or cp.get("poc_phone", "")
-            draft["cover_page"] = cp
+    # --- Cover Page ---
+    st.markdown("### Cover Page")
 
-            draft["cover_letter"] = out.get("cover_letter", "") or draft.get("cover_letter", "")
-            draft["outline"] = out.get("outline", "") or draft.get("outline", "")
+    left, right = st.columns([0.7, 1.3], gap="large")
 
-            ss["draft"] = draft
-            st.success("Draft package generated.")
-        except Exception as e:
-            ss["last_ai_error"] = str(e)
-            st.error(f"AI failed: {e}")
+    with left:
+        if company.get("logo_bytes"):
+            st.image(company["logo_bytes"], width=200)
+        else:
+            st.info("Upload a logo in Company Info to show it here.")
 
-    st.divider()
-    st.markdown("## Cover Page")
-    cp = draft.get("cover_page", {})
-    col1, col2 = st.columns(2)
-    with col1:
-        cp["contract_title"] = st.text_input("Contract Title", cp.get("contract_title", "") or rfp_meta.get("contract_title", ""))
-        cp["solicitation_number"] = st.text_input("Solicitation Number", cp.get("solicitation_number", "") or rfp_meta.get("solicitation_number", ""))
-        cp["agency"] = st.text_input("Agency", cp.get("agency", "") or rfp_meta.get("agency", ""))
-        cp["due_date"] = st.text_input("Due Date", cp.get("due_date", "") or rfp_meta.get("due_date", ""))
-    with col2:
-        cp["offeror_name"] = st.text_input("Offeror (Company)", cp.get("offeror_name", "") or company.get("legal_name", ""))
-        cp["poc_name"] = st.text_input("POC Name", cp.get("poc_name", "") or company.get("primary_poc_name", ""))
-        cp["poc_email"] = st.text_input("POC Email", cp.get("poc_email", "") or company.get("primary_poc_email", ""))
-        cp["poc_phone"] = st.text_input("POC Phone", cp.get("poc_phone", "") or company.get("primary_poc_phone", ""))
+    with right:
+        c1, c2 = st.columns(2)
+        with c1:
+            draft["cover_title"] = st.text_input("Proposal Title", value=draft.get("cover_title", ""))
+            draft["cover_contract"] = st.text_input("Contract / Opportunity Name", value=draft.get("cover_contract", ""))
+            draft["cover_solicitation"] = st.text_input("Solicitation #", value=draft.get("cover_solicitation", ""))
+        with c2:
+            draft["cover_agency"] = st.text_input("Agency", value=draft.get("cover_agency", ""))
+            draft["cover_due_date"] = st.text_input("Due Date", value=draft.get("cover_due_date", ""))
 
-    draft["cover_page"] = cp
+    st.markdown("---")
 
-    st.divider()
-    st.markdown("## Cover Letter")
-    draft["cover_letter"] = st.text_area("Edit cover letter", draft.get("cover_letter", ""), height=260)
+    # --- AI Drafting Control ---
+    st.markdown("### AI Drafting")
 
-    st.divider()
-    st.markdown("## Outline")
-    draft["outline"] = st.text_area("Edit outline", draft.get("outline", ""), height=220)
+    if not ss.get("ai_enabled"):
+        st.info("AI is currently OFF. Enable it in the sidebar when your API key is configured.")
 
-    st.divider()
-    st.markdown("## Narrative")
-    draft["narrative"] = st.text_area("Edit narrative", draft.get("narrative", ""), height=280)
+    colA, colB = st.columns([1, 1])
 
-    st.divider()
-    st.markdown("## AI Fix Recommendations (inline, not a separate page)")
-    if st.button("AI: Recommend Fixes", use_container_width=True):
-        try:
-            ss["last_ai_error"] = ""
-            combined = "\n\n".join([
-                draft.get("cover_letter", ""),
-                draft.get("outline", ""),
-                draft.get("narrative", ""),
-            ]).strip()
-            draft["notes"] = ai_recommend_fixes(ss.get("rfp_text",""), ss.get("matrix", []), combined)
-        except Exception as e:
-            ss["last_ai_error"] = str(e)
-            st.error(f"AI failed: {e}")
+    with colA:
+        if st.button("Generate Draft Sections (AI)", use_container_width=True, disabled=not ss.get("ai_enabled")):
+            # Stub: you will wire this to core.ai later
+            draft.setdefault("outline", "AI outline will appear here.")
+            draft.setdefault("narrative", "AI-generated narrative will appear here.")
+            ui_notice("AI DRAFT", "Draft sections generated.", tone="good")
 
-    draft["notes"] = st.text_area("Recommendations / Fix list", draft.get("notes", ""), height=200)
-
-    ss["draft"] = draft
+    with colB:
+        if st.button("Clear Draft", use_container_width=True):
+            ss["draft"] = {
+                "cover_title": "",
+                "cover_contract": "",
+                "cover_solicitation": "",
+                "cover_agency":
