@@ -1,8 +1,4 @@
 streamlit
 pypdf
 python-docx
-pandas
-reportlab
-openpyxl
-sqlalchemy
-psycopg2-binary
+requests
