@@ -3,6 +3,17 @@ import json
 import re
 import base64
 import textwrap
+import os
+from flask import jsonify
+
+@app.get("/debug/env")
+def debug_env():
+    key = os.getenv("OPENAI_API_KEY", "")
+    return jsonify({
+        "has_openai_api_key": bool(key),
+        "key_prefix": key[:3] if key else None,
+        "key_length": len(key) if key else 0
+    })
 from dataclasses import dataclass, asdict, field
 from typing import List, Dict, Tuple, Optional, Any
 
