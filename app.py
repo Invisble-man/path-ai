@@ -63,7 +63,7 @@ def _inject_global_css() -> None:
 def _sidebar_nav() -> None:
     st.sidebar.markdown(f"## {APP_TITLE}")
     st.sidebar.markdown(
-        "<div class='path-muted'>TurboTax-style guidance for federal proposals.</div>",
+        "<div class='path-muted'>YOU ARE NOW ON THE PATH TO SUCCESS.</div>",
         unsafe_allow_html=True,
     )
     st.sidebar.markdown("---")
