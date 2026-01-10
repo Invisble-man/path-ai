@@ -30,12 +30,7 @@ BUILD_DATE = "Jan 10, 2026"
 st.set_page_config(page_title=f"{APP_NAME} – Proposal Prep", layout="wide")
 
 
-key = os.getenv("OPENAI_API_KEY", "")
-st.sidebar.write("ENV TEST:", {
-    "has_openai_api_key": bool(key),
-    "key_prefix": key[:3] if key else None,
-    "key_length": len(key) if key else 0
-})
+
 
 # ============================================================
 # HTML helper (prevents Streamlit Markdown code-block rendering)
