@@ -1,110 +1,62 @@
-# ui/pages/dashboard.py
 from __future__ import annotations
 
 import streamlit as st
 
-from core.scoring import compute_scores
-from ui.components import render_readiness_console, ui_notice
+from core.state import get_rfp, set_current_step
+from core.scoring import compute_all_scores
+from ui.components import section_header, walking_progress, warn_box, ok_box, badge
 
 
-def page_dashboard():
-    """
-    Dashboard = Readiness Console + Diagnostics + Critical Submission Info + Warnings + Quick Actions
-    Assumes these session keys may exist:
-      - rfp_text, rfp_filename, rfp_pages, rfp_meta (dict)
-      - company (dict)
-      - draft (dict) and/or drafts (dict)
-    """
+def render() -> None:
+    rfp = get_rfp()
+    scores = compute_all_scores()
 
-    ss = st.session_state
+    st.title("Dashboard")
+    st.markdown("<div class='path-muted'>You’re on the right path to success.</div>", unsafe_allow_html=True)
+    st.write("")
+    badge("Readiness Console")
 
-    # Title area
-    st.markdown("## Dashboard")
-    st.caption("No clutter. Compliance, win strength, progress — plus only critical submission signals.")
-
-    # Hard requirement: need an RFP for meaningful dashboard
-    if not (ss.get("rfp_text") or "").strip():
-        ui_notice("UPLOAD REQUIRED", "Start by uploading an RFP on Upload RFP, then click Analyze.", tone="warn")
+    if not (rfp.extracted and rfp.text.strip()):
+        warn_box("No RFP is uploaded yet. Go back to Upload RFP to start.")
+        if st.button("Go to Upload RFP", type="primary"):
+            set_current_step("home")
+            st.rerun()
         return
 
-    # Compute scores + persist for sidebar widgets
-    scores = compute_scores(ss)
-    ss["scores"] = scores
+    section_header("Readiness Overview", "Step 2 of 6")
 
-    # Readiness Console (banner + bars + walker)
-    render_readiness_console(
-        scores=scores,
-        build_version=ss.get("build_version", "v1"),
-        build_date=ss.get("build_date", ""),
-    )
-
-    # --- Top: Diagnostics + Critical Submission Info ---
-    st.markdown("### RFP Diagnostics")
-    d1, d2, d3 = st.columns(3)
-    with d1:
-        st.metric("Filename", ss.get("rfp_filename") or "—")
-    with d2:
-        st.metric("Pages (est.)", int(ss.get("rfp_pages") or 0))
-    with d3:
-        st.metric("Characters", len(ss.get("rfp_text") or ""))
-
-    meta = ss.get("rfp_meta", {}) or {}
-
-    st.markdown("### Critical Submission Info")
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.write("**Due Date:**", meta.get("due_date") or "—")
-        st.write("**Solicitation:**", meta.get("solicitation") or "—")
+        walking_progress("Compliance", scores["compliance_pct"], "Based on your Compatibility Matrix.")
     with c2:
-        st.write("**Submit Email:**", meta.get("submit_email") or "—")
-        st.write("**Submission Method:**", meta.get("submission_method") or "—")
+        walking_progress("Completion", scores["completion_pct"], "Based on how much info is filled out.")
     with c3:
-        st.write("**Agency:**", meta.get("agency") or "—")
-        st.write("**Title:**", meta.get("title") or "—")
+        walking_progress("Win Probability", scores["win_probability_pct"], "Heuristic estimate (not a guarantee).")
 
-    # --- Warnings (eligibility/compliance) ---
-    warnings = scores.get("warnings", []) or []
-    if warnings:
-        st.markdown("### Warnings")
-        for w in warnings:
-            st.warning(w)
+    st.write("")
+    section_header("RFP Snapshot")
 
-    # --- Progress breakdown cards (quick) ---
-    st.markdown("### Snapshot")
-    s1, s2, s3 = st.columns(3)
-    with s1:
-        st.metric("Compliance", f"{float(scores.get('compliance_pct', 0.0)):.0f}%")
-    with s2:
-        st.metric("Win Strength", f"{float(scores.get('win_strength_pct', 0.0)):.0f}%")
-    with s3:
-        st.metric("Overall Progress", f"{float(scores.get('overall_progress_pct', 0.0)):.0f}%")
+    left, right = st.columns([2, 1])
+    with left:
+        st.markdown(f"**File:** {rfp.filename}")
+        st.markdown(f"**Pages:** {rfp.pages}")
+        st.markdown(f"**Due date detected:** {rfp.due_date or 'Not detected'}")
+        st.markdown(f"**Submission email detected:** {rfp.submission_email or 'Not detected'}")
 
-    # --- Quick actions ---
-    st.markdown("---")
-    st.markdown("### Quick Actions")
-    a, b, c, d = st.columns(4)
-    with a:
-        if st.button("Upload RFP", use_container_width=True):
-            ss["current_page"] = "Upload RFP"
-            st.rerun()
-    with b:
-        if st.button("Company Info", use_container_width=True):
-            ss["current_page"] = "Company Info"
-            st.rerun()
-    with c:
-        if st.button("Draft Proposal", use_container_width=True):
-            ss["current_page"] = "Draft Proposal"
-            st.rerun()
-    with d:
-        if st.button("Export", use_container_width=True):
-            ss["current_page"] = "Export"
-            st.rerun()
+        if rfp.certifications_required:
+            st.markdown(f"**Certifications mentioned:** {', '.join(rfp.certifications_required)}")
+        else:
+            st.markdown("**Certifications mentioned:** None detected")
 
-    # --- Optional: show minimal internal state health (dev-friendly, not cluttery) ---
-    with st.expander("System Health (minimal)", expanded=False):
-        company = ss.get("company", {}) or {}
-        draft = ss.get("draft", {}) or {}
-        drafts = ss.get("drafts", {}) or {}
-        st.write("Company fields captured:", len([k for k, v in company.items() if str(v).strip()]))
-        st.write("Draft keys present:", sorted(list(draft.keys()))[:20])
-        st.write("Draft sections present:", sorted(list(drafts.keys()))[:20])
+    with right:
+        flags = st.session_state.get("eligibility_flags", []) or []
+        if flags:
+            warn_box("<br/>".join(flags))
+        else:
+            ok_box("No eligibility warnings detected so far.")
+
+    st.write("")
+    section_header("Next Step")
+    if st.button("Continue to Company Info", type="primary", use_container_width=True):
+        set_current_step("company")
+        st.rerun()
