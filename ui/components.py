@@ -369,4 +369,6 @@ def path_sidebar(scores: Dict[str, Any]):
 # ----------------------------
 # Certifications dropdown list
 # ----------------------------
-def certification_options() -> List
+from typing import List
+
+def certification_options() -> List[str]:
