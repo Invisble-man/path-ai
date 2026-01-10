@@ -1,148 +1,172 @@
-from typing import Dict, Any, List
-from core.openai_client import get_openai_client
+from __future__ import annotations
 
-MODEL = "gpt-4.1-mini"
+import os
+from typing import Optional, Dict, Any
 
-def _safe_text(text: str, limit: int = 35_000) -> str:
-    if not text:
-        return ""
-    return text[:limit]
+from tenacity import retry, stop_after_attempt, wait_exponential
 
-def ai_extract_requirements(rfp_text: str) -> List[Dict[str, Any]]:
+
+def has_openai_key() -> bool:
+    key = os.getenv("OPENAI_API_KEY", "").strip()
+    return bool(key)
+
+
+def _safe_trim(text: str, max_chars: int = 14000) -> str:
+    text = (text or "").strip()
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n\n[TRUNCATED]"
+
+
+@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=6))
+def _call_openai(prompt: str, system: str = "") -> str:
     """
-    AI extraction into structured requirements for the compatibility matrix.
+    Uses OpenAI if available. Designed to fail gracefully.
+    NOTE: We keep imports inside to prevent import errors / optional dependency issues.
     """
-    client = get_openai_client()
-    if client is None:
-        return []
+    if not has_openai_key():
+        raise RuntimeError("OPENAI_API_KEY not set.")
 
-    rfp_text = _safe_text(rfp_text)
+    from openai import OpenAI  # local import to avoid hard crash if package/version mismatch
 
-    prompt = f"""
-You are extracting proposal compliance requirements from an RFP.
+    client = OpenAI()
 
-Return ONLY JSON array. Each item must have:
-- requirement_id (string like REQ-001)
-- requirement (short clear requirement statement)
-- status (default "Not started")
-- notes (default "")
-- owner (default "")
-- evidence (default "")
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
 
-Extract 20-40 most important requirements.
-RFP TEXT:
-{rfp_text}
-""".strip()
+    resp = client.chat.completions.create(
+        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        messages=messages,
+        temperature=0.2,
+    )
+    return (resp.choices[0].message.content or "").strip()
 
-    resp = client.responses.create(
-        model=MODEL,
-        input=prompt,
+
+def generate_proposal_draft(
+    rfp_text: str,
+    company: Dict[str, Any],
+    max_chars: int = 14000,
+) -> Dict[str, str]:
+    """
+    Returns a dict with keys: cover_letter, proposal_body.
+    If no key, returns a solid non-AI fallback template.
+    """
+    rfp_text = _safe_trim(rfp_text, max_chars=max_chars)
+
+    company_name = (company.get("name") or "").strip() or "YOUR COMPANY"
+    uei = (company.get("uei") or "").strip()
+    cage = (company.get("cage") or "").strip()
+    address = (company.get("address") or "").strip()
+    naics = (company.get("naics") or "").strip()
+    certs = company.get("certifications") or []
+    differentiators = (company.get("differentiators") or "").strip()
+    past_perf = (company.get("past_performance") or "").strip()
+
+    # Fallback draft (works without AI)
+    fallback_cover = f"""[COVER LETTER]
+
+{company_name}
+{address}
+
+Subject: Proposal Submission – Response to Solicitation
+
+Dear Contracting Officer,
+
+{company_name} is pleased to submit this proposal in response to the referenced solicitation. Our team is prepared to deliver high-quality outcomes while meeting all schedule, compliance, and reporting requirements.
+
+Company Identifiers:
+- UEI: {uei or "N/A"}
+- CAGE: {cage or "N/A"}
+- NAICS: {naics or "N/A"}
+- Certifications: {", ".join(certs) if certs else "N/A"}
+
+We appreciate the opportunity to compete and look forward to supporting your mission.
+
+Respectfully,
+{company_name}
+"""
+
+    fallback_body = f"""[PROPOSAL BODY]
+
+1. Executive Summary
+{company_name} will deliver the required scope with disciplined execution, clear communication, and measurable outcomes.
+
+2. Understanding of Requirements
+We reviewed the solicitation and will address all requirements, deliverables, and submission instructions.
+
+3. Technical Approach
+- Delivery plan aligned to the statement of work
+- Quality control checkpoints
+- Risk management and mitigation
+
+4. Management Plan
+- Dedicated program leadership
+- Clear roles and responsibilities
+- Weekly status reporting and milestone tracking
+
+5. Differentiators
+{differentiators or "- Veteran-led execution\n- Compliance-first documentation\n- Fast turnaround with strong QA"}
+
+6. Past Performance
+{past_perf or "Relevant past performance available upon request; references can be provided."}
+
+7. Compliance & Attachments
+We will submit all required forms, representations, and certifications as specified.
+"""
+
+    # If no AI key, return fallback immediately
+    if not has_openai_key():
+        return {"cover_letter": fallback_cover, "proposal_body": fallback_body}
+
+    system = (
+        "You are an expert federal proposal writer. "
+        "Write clear, compliant, professional text. "
+        "Avoid fluff. Use headings and bullet points. "
+        "Do NOT invent certifications or past performance—use what's provided."
     )
 
-    # responses output_text is the safest helper
-    raw = getattr(resp, "output_text", None)
-    if not raw:
-        # fallback: try to pull text chunks
-        raw = ""
-        try:
-            for item in resp.output:
-                if getattr(item, "type", "") == "output_text":
-                    for c in item.content:
-                        if getattr(c, "type", "") == "output_text":
-                            raw += c.text
-        except Exception:
-            pass
-
-    import json
-    try:
-        data = json.loads(raw)
-        # normalize IDs
-        out = []
-        for i, r in enumerate(data, start=1):
-            out.append({
-                "requirement_id": r.get("requirement_id") or f"REQ-{i:03d}",
-                "requirement": r.get("requirement") or "",
-                "status": r.get("status") or "Not started",
-                "notes": r.get("notes") or "",
-                "owner": r.get("owner") or "",
-                "evidence": r.get("evidence") or "",
-            })
-        return out
-    except Exception:
-        return []
-
-def ai_draft_sections(rfp_text: str, company: Dict[str, Any]) -> Dict[str, str]:
-    """
-    Creates outline + narrative draft using RFP + Company info.
-    """
-    client = get_openai_client()
-    if client is None:
-        return {"outline": "", "narrative": ""}
-
-    rfp_text = _safe_text(rfp_text)
-    company_blob = _safe_text(str(company), 8_000)
-
     prompt = f"""
-You are writing a federal proposal draft. Use the RFP and company profile.
+Company info:
+- Name: {company_name}
+- UEI: {uei or "N/A"}
+- CAGE: {cage or "N/A"}
+- Address: {address or "N/A"}
+- NAICS: {naics or "N/A"}
+- Certifications: {", ".join(certs) if certs else "N/A"}
+- Differentiators: {differentiators or "N/A"}
+- Past performance: {past_perf or "N/A"}
 
-Return ONLY JSON:
-{{
-  "outline": "...",
-  "narrative": "..."
-}}
-
-RFP TEXT:
+RFP text (may be truncated):
 {rfp_text}
 
-COMPANY PROFILE:
-{company_blob}
+Task:
+1) Create a one-page cover letter tailored to this RFP.
+2) Create a proposal body that includes: Executive Summary, Understanding of Requirements, Technical Approach, Management Plan, Staffing, Quality Control, Risk Management, Past Performance, and Compliance.
+Return ONLY two sections with labels:
+[COVER LETTER]
+...
+[PROPOSAL BODY]
+...
 """.strip()
 
-    resp = client.responses.create(model=MODEL, input=prompt)
-    raw = getattr(resp, "output_text", "") or ""
-
-    import json
     try:
-        obj = json.loads(raw)
-        return {"outline": obj.get("outline",""), "narrative": obj.get("narrative","")}
+        text = _call_openai(prompt, system=system)
+        # Split into sections if possible
+        cover = fallback_cover
+        body = fallback_body
+
+        if "[COVER LETTER]" in text and "[PROPOSAL BODY]" in text:
+            cover = text.split("[PROPOSAL BODY]")[0].replace("[COVER LETTER]", "").strip()
+            body = text.split("[PROPOSAL BODY]")[1].strip()
+            cover = "[COVER LETTER]\n\n" + cover
+            body = "[PROPOSAL BODY]\n\n" + body
+        else:
+            # If model didn't follow format, just put it in body
+            body = "[PROPOSAL BODY]\n\n" + text
+
+        return {"cover_letter": cover, "proposal_body": body}
     except Exception:
-        # fallback: just dump into narrative
-        return {"outline": "", "narrative": raw}
-
-def ai_suggest_fixes(rfp_text: str, draft: Dict[str, Any], company: Dict[str, Any]) -> List[str]:
-    """
-    Returns bullet suggestions. Used inline (no Fixes tab).
-    """
-    client = get_openai_client()
-    if client is None:
-        return []
-
-    rfp_text = _safe_text(rfp_text)
-    draft_blob = _safe_text(str(draft), 10_000)
-    company_blob = _safe_text(str(company), 8_000)
-
-    prompt = f"""
-You are a proposal compliance coach.
-Given the RFP, company profile, and current draft, return 8-15 concise fix suggestions as a JSON array of strings.
-Focus on missing sections, compliance gaps, eligibility issues, and clarity.
-
-RFP TEXT:
-{rfp_text}
-
-COMPANY:
-{company_blob}
-
-DRAFT:
-{draft_blob}
-""".strip()
-
-    resp = client.responses.create(model=MODEL, input=prompt)
-    raw = getattr(resp, "output_text", "") or ""
-
-    import json
-    try:
-        arr = json.loads(raw)
-        return [str(x) for x in arr][:20]
-    except Exception:
-        # fallback: split lines
-        return [l.strip("-• ").strip() for l in raw.splitlines() if l.strip()][:20]
+        # AI failed: fall back safely
+        return {"cover_letter": fallback_cover, "proposal_body": fallback_body}
