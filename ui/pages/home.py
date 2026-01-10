@@ -57,7 +57,7 @@ def page_home(show_results_only: bool = False):
         # Load
         if up is not None:
             b = up.read()
-            text, name = extract_rfp_text(b, up.name)
+text, name = extract_rfp_text(b)
             ss["rfp_text"] = text
             ss["rfp_name"] = name
             ss["rfp_file_bytes"] = b  # used for page count analysis
