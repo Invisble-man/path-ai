@@ -2,69 +2,64 @@ from __future__ import annotations
 
 import streamlit as st
 
-from core.scoring import compute_scores
-from ui.components import ui_notice
+from core.state import get_rfp, get_company, set_current_step
+from core.ai import generate_proposal_draft, has_openai_key
+from core.scoring import compute_all_scores
+from ui.components import section_header, warn_box, badge
 
 
-def page_draft():
-    ss = st.session_state
+def render() -> None:
+    rfp = get_rfp()
+    company = get_company()
 
-    st.markdown("## Draft Proposal")
-    st.caption("Build your cover page, outline, and narrative. Path.ai scores and flags issues inline.")
+    st.title("Draft Proposal")
+    st.markdown("<div class='path-muted'>Generate a clean proposal draft synced to your RFP and company profile.</div>", unsafe_allow_html=True)
 
-    # Compute live scores
-    scores = compute_scores(ss)
+    section_header("Draft Generator", "Step 4 of 6")
 
-    # --- Eligibility + compliance warnings (inline, not blocking) ---
-    warnings = scores.get("warnings", []) or []
-    for w in warnings:
-        st.warning(w)
+    if not (rfp.extracted and rfp.text.strip()):
+        warn_box("Upload and analyze an RFP first.")
+        if st.button("Go to Upload RFP", type="primary"):
+            set_current_step("home")
+            st.rerun()
+        return
 
-    draft = ss.get("draft", {}) or {}
-    company = ss.get("company", {}) or {}
+    if not company.name.strip():
+        warn_box("Company name is missing. You can still draft, but your cover page/letter will be generic.")
 
-    # --- Cover Page ---
-    st.markdown("### Cover Page")
+    if not (company.uei.strip() or company.cage.strip()):
+        warn_box("UEI/CAGE missing. Not blocking, but your proposal will look incomplete.")
 
-    left, right = st.columns([0.7, 1.3], gap="large")
-
-    with left:
-        if company.get("logo_bytes"):
-            st.image(company["logo_bytes"], width=200)
-        else:
-            st.info("Upload a logo in Company Info to show it here.")
-
-    with right:
-        c1, c2 = st.columns(2)
-        with c1:
-            draft["cover_title"] = st.text_input("Proposal Title", value=draft.get("cover_title", ""))
-            draft["cover_contract"] = st.text_input("Contract / Opportunity Name", value=draft.get("cover_contract", ""))
-            draft["cover_solicitation"] = st.text_input("Solicitation #", value=draft.get("cover_solicitation", ""))
-        with c2:
-            draft["cover_agency"] = st.text_input("Agency", value=draft.get("cover_agency", ""))
-            draft["cover_due_date"] = st.text_input("Due Date", value=draft.get("cover_due_date", ""))
-
-    st.markdown("---")
-
-    # --- AI Drafting Control ---
-    st.markdown("### AI Drafting")
-
-    if not ss.get("ai_enabled"):
-        st.info("AI is currently OFF. Enable it in the sidebar when your API key is configured.")
+    st.write("")
+    badge("AI is optional • App runs without a key")
 
     colA, colB = st.columns([1, 1])
-
     with colA:
-        if st.button("Generate Draft Sections (AI)", use_container_width=True, disabled=not ss.get("ai_enabled")):
-            # Stub: you will wire this to core.ai later
-            draft.setdefault("outline", "AI outline will appear here.")
-            draft.setdefault("narrative", "AI-generated narrative will appear here.")
-            ui_notice("AI DRAFT", "Draft sections generated.", tone="good")
-
+        st.markdown(f"**AI Status:** {'Enabled' if has_openai_key() else 'Disabled (no key found)'}")
     with colB:
-        if st.button("Clear Draft", use_container_width=True):
-            ss["draft"] = {
-                "cover_title": "",
-                "cover_contract": "",
-                "cover_solicitation": "",
-                "cover_agency":
+        st.markdown(f"**RFP file:** {rfp.filename}")
+
+    st.write("")
+    if st.button("Generate / Refresh Draft", type="primary", use_container_width=True):
+        with st.spinner("Generating draft..."):
+            result = generate_proposal_draft(rfp.text, company.to_dict())
+            st.session_state.draft_cover_letter = result["cover_letter"]
+            st.session_state.draft_body = result["proposal_body"]
+            compute_all_scores()
+            st.success("Draft generated.")
+
+    cover = st.session_state.get("draft_cover_letter", "")
+    body = st.session_state.get("draft_body", "")
+
+    st.write("")
+    section_header("Cover Letter")
+    st.session_state.draft_cover_letter = st.text_area("Edit cover letter", value=cover, height=260)
+
+    st.write("")
+    section_header("Proposal Body")
+    st.session_state.draft_body = st.text_area("Edit proposal body", value=body, height=520)
+
+    st.write("")
+    if st.button("Continue to Compatibility Matrix", type="primary", use_container_width=True):
+        set_current_step("compatibility")
+        st.rerun()
