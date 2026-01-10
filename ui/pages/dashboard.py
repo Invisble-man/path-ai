@@ -16,8 +16,24 @@ def render() -> None:
     st.write("")
     badge("Readiness Console")
 
-    if not (rfp.extracted and rfp.text.strip()):
-        warn_box("No RFP is uploaded yet. Go back to Upload RFP to start.")
+    # Debug snapshot (helps you instantly see what's missing)
+    with st.expander("Debug snapshot (what the app sees)", expanded=False):
+        st.write(
+            {
+                "rfp.filename": rfp.filename,
+                "rfp.pages": rfp.pages,
+                "rfp.extracted": rfp.extracted,
+                "rfp.text_length": len(rfp.text or ""),
+                "has_rfp_file_bytes": "rfp_file_bytes" in st.session_state,
+            }
+        )
+
+    if not (rfp.extracted and (rfp.text or "").strip()):
+        warn_box(
+            "Dashboard can’t find extracted RFP text. "
+            "This usually means the PDF is scanned/image-based or extraction failed. "
+            "Go back to Upload RFP and try another PDF."
+        )
         if st.button("Go to Upload RFP", type="primary"):
             set_current_step("home")
             st.rerun()
