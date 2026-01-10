@@ -5,13 +5,10 @@ import streamlit as st
 
 
 # -----------------------------
-# Simple UI Helpers
+# Notices
 # -----------------------------
 
 def ui_notice(msg: str, kind: str = "info") -> None:
-    """
-    kind: "info" | "success" | "warning" | "error"
-    """
     kind = (kind or "info").lower().strip()
     if kind == "success":
         st.success(msg)
@@ -23,41 +20,11 @@ def ui_notice(msg: str, kind: str = "info") -> None:
         st.info(msg)
 
 
-def _grade_from_pct(pct: float) -> str:
-    pct = max(0.0, min(100.0, pct))
-    if pct >= 90:
-        return "A"
-    if pct >= 80:
-        return "B"
-    if pct >= 70:
-        return "C"
-    if pct >= 60:
-        return "D"
-    return "F"
-
-
-def _safe_pct(value: Any) -> float:
-    try:
-        v = float(value)
-    except Exception:
-        v = 0.0
-    return max(0.0, min(100.0, v))
-
-
 # -----------------------------
-# Sidebar Progress (TurboTax-like)
+# Sidebar Progress
 # -----------------------------
 
 def render_sidebar_progress() -> None:
-    """
-    Expects st.session_state["steps"] = {
-      "home": {"status": "green|orange|red"},
-      "company": {...},
-      "draft": {...},
-      "compat": {...},
-      "export": {...}
-    }
-    """
     st.sidebar.markdown("## Path.AI Progress")
     st.sidebar.caption("Green = complete • Orange = in progress • Red = not started")
 
@@ -76,13 +43,12 @@ def render_sidebar_progress() -> None:
 
     st.sidebar.markdown("---")
 
-    # show AI enabled status without breaking anything
-    has_key = bool(st.secrets.get("OPENAI_API_KEY", "") or "")
+    has_key = bool(st.secrets.get("OPENAI_API_KEY", ""))
     st.sidebar.caption(f"AI: {'enabled' if has_key else 'not detected'}")
 
 
 # -----------------------------
-# Certifications Dropdown Options
+# Certifications Dropdown
 # -----------------------------
 
 def certification_options() -> List[str]:
@@ -109,32 +75,37 @@ def certification_options() -> List[str]:
 
 
 # -----------------------------
-# Readiness Console (Dashboard widget)
+# Readiness Console
 # -----------------------------
 
 def render_readiness_console(scores: Dict[str, Any] | None = None) -> None:
-    """
-    scores example:
-      {
-        "compliance": 62,
-        "company": 40,
-        "win": 55
-      }
-    """
     scores = scores or {}
-    compliance = _safe_pct(scores.get("compliance", 0))
-    company = _safe_pct(scores.get("company", 0))
-    win = _safe_pct(scores.get("win", 0))
 
-    overall = (compliance + company + win) / 3.0
-    grade = _grade_from_pct(overall)
+    def clamp(v):
+        try:
+            return max(0, min(100, float(v)))
+        except Exception:
+            return 0
+
+    compliance = clamp(scores.get("compliance", 0))
+    company = clamp(scores.get("company", 0))
+    win = clamp(scores.get("win", 0))
+
+    overall = (compliance + company + win) / 3
+
+    def grade(p):
+        if p >= 90: return "A"
+        if p >= 80: return "B"
+        if p >= 70: return "C"
+        if p >= 60: return "D"
+        return "F"
 
     st.markdown("## Readiness Console")
-    st.caption("Only unresolved items that affect readiness are shown.")
+    st.caption("Live proposal strength indicators")
 
     c1, c2 = st.columns([3, 1])
     with c2:
-        st.markdown(f"### {int(overall)}% • Grade {grade}")
+        st.markdown(f"### {int(overall)}% • Grade {grade(overall)}")
 
     st.markdown("**COMPLIANCE**")
     st.progress(compliance / 100)
