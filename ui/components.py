@@ -97,3 +97,29 @@ def sidebar_nav(app_name: str, build_version: str):
         pass
     has_key = bool(env_key or key)
     st.sidebar.caption(f"AI: {'enabled' if has_key else 'missing key'}")
+    def get_certifications_list():
+    """
+    Master list of business certifications for gov contracting.
+    Used in Company Info dropdowns and eligibility checks.
+    """
+    return [
+        "Small Business (SB)",
+        "8(a)",
+        "HUBZone",
+        "Women-Owned Small Business (WOSB)",
+        "Economically Disadvantaged WOSB (EDWOSB)",
+        "Veteran-Owned Small Business (VOSB)",
+        "Service-Disabled Veteran-Owned Small Business (SDVOSB)",
+        "Minority-Owned Business (MBE)",
+        "Disadvantaged Business Enterprise (DBE)",
+        "Historically Underutilized Business Zone (HUBZone)",
+        "ISO 9001",
+        "ISO 27001",
+        "CMMI Level 3+",
+        "GSA MAS",
+        "State / Local Certified Vendor",
+        "Tribal-Owned Business",
+        "LGBTQ+ Owned Business",
+        "AbilityOne",
+        "Other"
+    ]
