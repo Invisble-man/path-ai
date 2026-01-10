@@ -2,7 +2,7 @@ import streamlit as st
 
 from core.state import init_state
 from ui.pages.home import page_home
-from ui.pages.company_info import page_company_info
+from ui.pages.company import page_company
 from ui.pages.draft import page_draft
 from ui.pages.export import page_export
 from core.scoring import compute_progress
