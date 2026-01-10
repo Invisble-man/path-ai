@@ -1,123 +1,64 @@
 from __future__ import annotations
 
-import io
-from typing import Dict, Any, Optional
+from io import BytesIO
+from typing import Dict, Any, List
 
 from docx import Document
 from docx.shared import Inches
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml import OxmlElement
-from docx.oxml.ns import qn
 
 
-def _add_page_numbers(doc: Document):
-    section = doc.sections[0]
-    footer = section.footer
-    p = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = p.add_run("Page ")
-    _add_field(run, "PAGE")
-    p.add_run(" of ")
-    _add_field(p.add_run(), "NUMPAGES")
-
-
-def _add_field(run, field_code: str):
-    r = run._r
-    fldChar1 = OxmlElement('w:fldChar')
-    fldChar1.set(qn('w:fldCharType'), 'begin')
-
-    instrText = OxmlElement('w:instrText')
-    instrText.set(qn('xml:space'), 'preserve')
-    instrText.text = field_code
-
-    fldChar2 = OxmlElement('w:fldChar')
-    fldChar2.set(qn('w:fldCharType'), 'end')
-
-    r.append(fldChar1)
-    r.append(instrText)
-    r.append(fldChar2)
-
-
-def _add_toc(doc: Document):
-    doc.add_page_break()
-    doc.add_heading("Table of Contents", level=1)
-    p = doc.add_paragraph()
-    run = p.add_run()
-    fldChar1 = OxmlElement('w:fldChar')
-    fldChar1.set(qn('w:fldCharType'), 'begin')
-    instrText = OxmlElement('w:instrText')
-    instrText.set(qn('xml:space'), 'preserve')
-    instrText.text = 'TOC \\o "1-3" \\z \\u'
-    fldChar2 = OxmlElement('w:fldChar')
-    fldChar2.set(qn('w:fldCharType'), 'end')
-    run._r.append(fldChar1)
-    run._r.append(instrText)
-    run._r.append(fldChar2)
-    doc.add_page_break()
-
-
-def _add_cover_page(doc: Document, company: Dict[str, Any], logo_bytes: Optional[bytes]):
-    doc.add_paragraph("\n\n")
-
-    if logo_bytes:
-        try:
-            p = doc.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p.add_run().add_picture(io.BytesIO(logo_bytes), width=Inches(2.5))
-        except Exception:
-            pass
-
-    def center_bold(text):
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r = p.add_run(text)
-        r.bold = True
-
-    center_bold(company.get("legal_name") or "Company Name")
-    center_bold(company.get("proposal_title") or "Proposal Title")
-
-    doc.add_paragraph("")
-    p = doc.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.add_run(f"Solicitation: {company.get('solicitation_number') or '—'}")
-
-    p = doc.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.add_run(f"Agency: {company.get('agency_customer') or '—'}")
-
-    doc.add_page_break()
-
-
-def _add_section(doc: Document, title: str, body: str):
-    doc.add_heading(title, level=1)
-    for line in (body or "").splitlines():
-        doc.add_paragraph(line)
-
-
-def build_proposal_docx(
+def build_docx(
+    rfp: Dict[str, Any],
     company: Dict[str, Any],
-    drafts: Dict[str, str],
-    logo_bytes: Optional[bytes] = None,
+    draft_cover_letter: str,
+    draft_body: str,
+    compatibility_rows: List[Dict[str, Any]],
 ) -> bytes:
     doc = Document()
 
-    _add_page_numbers(doc)
-    _add_cover_page(doc, company, logo_bytes)
-    _add_toc(doc)
+    # Cover page (simple, professional)
+    doc.add_heading(company.get("name") or "Proposal", level=0)
 
-    sections = [
-        "Cover Letter",
-        "Executive Summary",
-        "Technical Approach",
-        "Management Plan",
-        "Past Performance",
-    ]
+    # Logo if present
+    logo_bytes = company.get("logo_bytes", None)
+    if logo_bytes:
+        try:
+            bio = BytesIO(logo_bytes)
+            doc.add_picture(bio, width=Inches(2.0))
+        except Exception:
+            pass
 
-    for sec in sections:
-        body = drafts.get(sec, "")
-        if body.strip():
-            _add_section(doc, sec, body)
+    doc.add_paragraph(company.get("address") or "")
+    doc.add_paragraph(f"UEI: {company.get('uei') or 'N/A'}   |   CAGE: {company.get('cage') or 'N/A'}")
+    doc.add_paragraph(f"NAICS: {company.get('naics') or 'N/A'}")
+    certs = company.get("certifications") or []
+    doc.add_paragraph(f"Certifications: {', '.join(certs) if certs else 'N/A'}")
 
-    buf = io.BytesIO()
-    doc.save(buf)
-    return buf.getvalue()
+    doc.add_page_break()
+
+    doc.add_heading("Cover Letter", level=1)
+    doc.add_paragraph(draft_cover_letter or "")
+
+    doc.add_page_break()
+
+    doc.add_heading("Proposal Body", level=1)
+    doc.add_paragraph(draft_body or "")
+
+    doc.add_page_break()
+
+    doc.add_heading("Compatibility Matrix", level=1)
+    table = doc.add_table(rows=1, cols=3)
+    hdr = table.rows[0].cells
+    hdr[0].text = "RFP Requirement"
+    hdr[1].text = "Response"
+    hdr[2].text = "Status"
+
+    for row in compatibility_rows or []:
+        cells = table.add_row().cells
+        cells[0].text = str(row.get("requirement", "") or "")
+        cells[1].text = str(row.get("response", "") or "")
+        cells[2].text = str(row.get("status", "") or "")
+
+    out = BytesIO()
+    doc.save(out)
+    return out.getvalue()
