@@ -2,86 +2,69 @@ from __future__ import annotations
 
 import streamlit as st
 
-from ui.components import ui_notice
-from exporters.excel_export import build_compatibility_matrix_xlsx
-from exporters.docx_export import build_proposal_docx
+from core.state import get_rfp, get_company, set_current_step
+from core.scoring import compute_all_scores
+from exporters.docx_export import build_docx
+from exporters.excel_export import build_matrix_xlsx
+from ui.components import section_header, warn_box, ok_box
 
 
-def page_export():
-    ss = st.session_state
+def render() -> None:
+    st.title("Export")
+    st.markdown("<div class='path-muted'>Export is always unlocked.</div>", unsafe_allow_html=True)
 
-    st.markdown("## Export")
-    st.caption("Exports are always unlocked. Download your Compatibility Matrix and Proposal Package.")
+    section_header("Downloads", "Step 6 of 6")
 
-    rfp_text = ss.get("rfp_text", "") or ""
-    company = ss.get("company", {}) or {}
-    draft = ss.get("draft", {}) or {}
-    meta = ss.get("rfp_meta", {}) or {}
+    rfp = get_rfp()
+    company = get_company()
+    compute_all_scores()
 
-    if not rfp_text.strip():
-        ui_notice("MISSING RFP", "Go back to Upload RFP and analyze a file first.", tone="warn")
-        st.stop()
+    # Always allow exports, but warn if missing
+    warnings = []
+    if not (rfp.extracted and rfp.text.strip()):
+        warnings.append("No RFP uploaded yet. Exports will be mostly empty.")
+    if not company.name.strip():
+        warnings.append("Company name missing. Cover page will be generic.")
+    if warnings:
+        warn_box("<br/>".join(warnings))
+    else:
+        ok_box("Ready to export.")
 
-    if not company.get("legal_name") and not company.get("uei"):
-        ui_notice("WEAK COMPANY INFO", "Company Info is mostly blank. Export still works, but your proposal will be thin.", tone="warn")
-
-    if not (draft.get("outline") or "").strip() and not (draft.get("narrative") or "").strip():
-        ui_notice("WEAK DRAFT", "Draft content is mostly blank. Export still works, but output will be minimal.", tone="warn")
-
-    st.markdown("---")
+    compatibility_rows = st.session_state.get("compatibility_rows", []) or []
+    cover = st.session_state.get("draft_cover_letter", "")
+    body = st.session_state.get("draft_body", "")
 
     # Build files
-    try:
-        xlsx_bytes = build_compatibility_matrix_xlsx(
-            rfp_text=rfp_text,
-            company=company,
-            meta=meta,
+    docx_bytes = build_docx(
+        rfp=rfp.to_dict(),
+        company=company.to_dict(),
+        draft_cover_letter=cover,
+        draft_body=body,
+        compatibility_rows=compatibility_rows,
+    )
+    xlsx_bytes = build_matrix_xlsx(compatibility_rows)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            "Download Proposal (DOCX)",
+            data=docx_bytes,
+            file_name="PathAI_Proposal.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True,
+            type="primary",
         )
-    except Exception as e:
-        xlsx_bytes = None
-        ui_notice("MATRIX ERROR", f"Could not build compatibility matrix: {e}", tone="bad")
 
-    try:
-        docx_bytes = build_proposal_docx(
-            company=company,
-            meta=meta,
-            draft=draft,
+    with col2:
+        st.download_button(
+            "Download Compatibility Matrix (XLSX)",
+            data=xlsx_bytes,
+            file_name="PathAI_Compatibility_Matrix.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
         )
-    except Exception as e:
-        docx_bytes = None
-        ui_notice("DOCX ERROR", f"Could not build DOCX: {e}", tone="bad")
 
-    c1, c2 = st.columns([1, 1], gap="large")
-
-    with c1:
-        st.markdown("### Compatibility Matrix (XLSX)")
-        st.caption("Tracks requirements → response mapping → status → notes.")
-        if xlsx_bytes:
-            st.download_button(
-                "Download Compatibility Matrix",
-                data=xlsx_bytes,
-                file_name="PathAI_Compatibility_Matrix.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-        else:
-            st.info("Matrix not available yet (error above).")
-
-    with c2:
-        st.markdown("### Proposal Package (DOCX)")
-        st.caption("Cover page + cover letter + outline + narrative.")
-        if docx_bytes:
-            st.download_button(
-                "Download Proposal Package",
-                data=docx_bytes,
-                file_name="PathAI_Proposal_Package.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
-            )
-        else:
-            st.info("DOCX not available yet (error above).")
-
-    st.markdown("---")
-    if st.button("Back to Draft Proposal", use_container_width=True):
-        ss["current_page"] = "Draft Proposal"
+    st.write("")
+    if st.button("Back to Dashboard", use_container_width=True):
+        set_current_step("dashboard")
         st.rerun()
