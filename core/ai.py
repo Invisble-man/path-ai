@@ -1,82 +1,148 @@
-from __future__ import annotations
+from typing import Dict, Any, List
+from core.openai_client import get_openai_client
 
-from typing import Dict, Any
+MODEL = "gpt-4.1-mini"
 
-from core.openai_client import get_client
+def _safe_text(text: str, limit: int = 35_000) -> str:
+    if not text:
+        return ""
+    return text[:limit]
 
-
-def draft_sections_with_ai(rfp_text: str, company: Dict[str, Any]) -> Dict[str, str]:
+def ai_extract_requirements(rfp_text: str) -> List[Dict[str, Any]]:
     """
-    Returns dict with: cover, outline, narrative
+    AI extraction into structured requirements for the compatibility matrix.
     """
-    client = get_client()
+    client = get_openai_client()
     if client is None:
-        return {"cover": "", "outline": "", "narrative": ""}
+        return []
 
-    company_block = "\n".join(
-        [
-            f"Legal name: {company.get('legal_name','')}",
-            f"DBA: {company.get('dba','')}",
-            f"UEI: {company.get('uei','')}",
-            f"CAGE: {company.get('cage','')}",
-            f"NAICS: {company.get('naics','')}",
-            f"Certifications: {', '.join(company.get('certifications', []) or [])}",
-            f"Capabilities: {company.get('capabilities','')}",
-            f"Past performance: {company.get('past_performance','')}",
-            f"Differentiators: {company.get('differentiators','')}",
-        ]
-    ).strip()
+    rfp_text = _safe_text(rfp_text)
 
     prompt = f"""
-You are an expert federal proposal writer.
+You are extracting proposal compliance requirements from an RFP.
 
-Use the RFP text + company info to produce:
-1) Cover Letter (1 page max, professional)
-2) Proposal Outline (section headings only)
-3) Draft Narrative (starter, structured, compliant tone)
+Return ONLY JSON array. Each item must have:
+- requirement_id (string like REQ-001)
+- requirement (short clear requirement statement)
+- status (default "Not started")
+- notes (default "")
+- owner (default "")
+- evidence (default "")
 
-RFP TEXT (trimmed):
-{rfp_text[:18000]}
-
-COMPANY INFO:
-{company_block}
+Extract 20-40 most important requirements.
+RFP TEXT:
+{rfp_text}
 """.strip()
 
-    # Use Chat Completions (most stable)
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[
-            {"role": "system", "content": "Write in a clean, federal-compliant proposal style. Be specific. No fluff."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.3,
+    resp = client.responses.create(
+        model=MODEL,
+        input=prompt,
     )
 
-    text = resp.choices[0].message.content or ""
+    # responses output_text is the safest helper
+    raw = getattr(resp, "output_text", None)
+    if not raw:
+        # fallback: try to pull text chunks
+        raw = ""
+        try:
+            for item in resp.output:
+                if getattr(item, "type", "") == "output_text":
+                    for c in item.content:
+                        if getattr(c, "type", "") == "output_text":
+                            raw += c.text
+        except Exception:
+            pass
 
-    # Simple split markers (you can improve later)
-    cover = ""
-    outline = ""
-    narrative = ""
+    import json
+    try:
+        data = json.loads(raw)
+        # normalize IDs
+        out = []
+        for i, r in enumerate(data, start=1):
+            out.append({
+                "requirement_id": r.get("requirement_id") or f"REQ-{i:03d}",
+                "requirement": r.get("requirement") or "",
+                "status": r.get("status") or "Not started",
+                "notes": r.get("notes") or "",
+                "owner": r.get("owner") or "",
+                "evidence": r.get("evidence") or "",
+            })
+        return out
+    except Exception:
+        return []
 
-    lower = text.lower()
-    if "cover letter" in lower and "proposal outline" in lower and "draft narrative" in lower:
-        # naive parsing by headings
-        def chunk(after: str, before: str) -> str:
-            a = lower.find(after)
-            b = lower.find(before)
-            if a == -1:
-                return ""
-            a2 = a + len(after)
-            if b == -1 or b <= a2:
-                return text[a2:].strip()
-            return text[a2:b].strip()
+def ai_draft_sections(rfp_text: str, company: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Creates outline + narrative draft using RFP + Company info.
+    """
+    client = get_openai_client()
+    if client is None:
+        return {"outline": "", "narrative": ""}
 
-        cover = chunk("cover letter", "proposal outline")
-        outline = chunk("proposal outline", "draft narrative")
-        narrative = chunk("draft narrative", "end")
-    else:
-        # fallback: dump all into narrative
-        narrative = text.strip()
+    rfp_text = _safe_text(rfp_text)
+    company_blob = _safe_text(str(company), 8_000)
 
-    return {"cover": cover.strip(), "outline": outline.strip(), "narrative": narrative.strip()}
+    prompt = f"""
+You are writing a federal proposal draft. Use the RFP and company profile.
+
+Return ONLY JSON:
+{{
+  "outline": "...",
+  "narrative": "..."
+}}
+
+RFP TEXT:
+{rfp_text}
+
+COMPANY PROFILE:
+{company_blob}
+""".strip()
+
+    resp = client.responses.create(model=MODEL, input=prompt)
+    raw = getattr(resp, "output_text", "") or ""
+
+    import json
+    try:
+        obj = json.loads(raw)
+        return {"outline": obj.get("outline",""), "narrative": obj.get("narrative","")}
+    except Exception:
+        # fallback: just dump into narrative
+        return {"outline": "", "narrative": raw}
+
+def ai_suggest_fixes(rfp_text: str, draft: Dict[str, Any], company: Dict[str, Any]) -> List[str]:
+    """
+    Returns bullet suggestions. Used inline (no Fixes tab).
+    """
+    client = get_openai_client()
+    if client is None:
+        return []
+
+    rfp_text = _safe_text(rfp_text)
+    draft_blob = _safe_text(str(draft), 10_000)
+    company_blob = _safe_text(str(company), 8_000)
+
+    prompt = f"""
+You are a proposal compliance coach.
+Given the RFP, company profile, and current draft, return 8-15 concise fix suggestions as a JSON array of strings.
+Focus on missing sections, compliance gaps, eligibility issues, and clarity.
+
+RFP TEXT:
+{rfp_text}
+
+COMPANY:
+{company_blob}
+
+DRAFT:
+{draft_blob}
+""".strip()
+
+    resp = client.responses.create(model=MODEL, input=prompt)
+    raw = getattr(resp, "output_text", "") or ""
+
+    import json
+    try:
+        arr = json.loads(raw)
+        return [str(x) for x in arr][:20]
+    except Exception:
+        # fallback: split lines
+        return [l.strip("-• ").strip() for l in raw.splitlines() if l.strip()][:20]
