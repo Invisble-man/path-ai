@@ -1,87 +1,76 @@
 from __future__ import annotations
 
 import streamlit as st
-from core.rfp import extract_rfp_text
-from ui.components import ui_notice, render_readiness_console
+
+from core.state import get_rfp, set_rfp, set_current_step, RFPData
+from core.rfp import parse_rfp_from_pdf_bytes
+from core.scoring import compute_all_scores
+from ui.components import badge, warn_box, section_header
 
 
-def page_home():
-    st.markdown("## You’re on the right path to success.")
-    st.caption("Upload an RFP/RFI, analyze it, and Path.ai will guide you step by step.")
+def render() -> None:
+    # Minimal “Google-like” center layout
+    st.title("Path.AI")
+    st.markdown("<div class='path-muted'>Upload an RFP/RFI PDF → Analyze → build your proposal step-by-step.</div>", unsafe_allow_html=True)
 
-    ss = st.session_state
+    st.write("")
+    badge("TurboTax-style guided flow • Export always unlocked")
 
-    col1, col2 = st.columns([1.2, 0.8], gap="large")
+    st.write("")
+    section_header("Upload RFP", "Step 1 of 6")
 
-    with col1:
+    # Center the upload box
+    left, center, right = st.columns([1, 2, 1])
+    with center:
         uploaded = st.file_uploader(
-            "Upload RFP (PDF or TXT)",
-            type=["pdf", "txt"],
+            "Drag & drop your PDF here",
+            type=["pdf"],
             accept_multiple_files=False,
+            label_visibility="visible",
         )
 
-        pasted = st.text_area(
-            "Or paste RFP text",
-            height=200,
-            placeholder="Paste solicitation text here if PDF extraction fails.",
-        )
+        rfp_state = get_rfp()
 
-        analyze_clicked = st.button("Analyze", use_container_width=True)
+        analyze = st.button("Analyze", type="primary", use_container_width=True, disabled=(uploaded is None))
 
-    with col2:
-        if ss.get("rfp_text"):
-            st.markdown("### Diagnostics")
+        if analyze and uploaded is not None:
+            with st.spinner("Extracting text and analyzing the RFP..."):
+                pdf_bytes = uploaded.getvalue()
+                parsed = parse_rfp_from_pdf_bytes(pdf_bytes)
 
-            st.metric("File", ss.get("rfp_filename") or "—")
-            st.metric("Pages (est.)", ss.get("rfp_pages") or 0)
-            st.metric("Characters", len(ss.get("rfp_text") or ""))
+                new_rfp = RFPData(
+                    filename=uploaded.name,
+                    pages=parsed.pages,
+                    text=parsed.text,
+                    extracted=True,
+                    due_date=parsed.due_date,
+                    submission_email=parsed.submission_email,
+                    certifications_required=parsed.certifications_required,
+                    eligibility_rules=parsed.eligibility_rules,
+                    past_performance_requirements=parsed.past_performance_requirements,
+                    requirements=parsed.requirements,
+                    flags=parsed.flags,
+                )
+                set_rfp(new_rfp)
 
-            meta = ss.get("rfp_meta", {}) or {}
-            st.markdown("#### Key Fields")
-            st.write("**Title:**", meta.get("title") or "—")
-            st.write("**Solicitation:**", meta.get("solicitation") or "—")
-            st.write("**Agency:**", meta.get("agency") or "—")
-            st.write("**Due Date:**", meta.get("due_date") or "—")
-            st.write("**Submit Email:**", meta.get("submit_email") or "—")
+                # Initialize compatibility rows from requirements (if any)
+                if parsed.requirements:
+                    st.session_state.compatibility_rows = [
+                        {"requirement": r, "response": "", "status": "Missing"} for r in parsed.requirements
+                    ]
+                else:
+                    st.session_state.compatibility_rows = []
 
-    if analyze_clicked:
-        # Priority: pasted text overrides file
-        if pasted and pasted.strip():
-            ss["rfp_text"] = pasted.strip()
-            ss["rfp_filename"] = "Pasted Text"
-            ss["rfp_pages"] = max(1, len(ss["rfp_text"]) // 1800)
-            ss["current_page"] = "Company Info"
-            ui_notice("ANALYZED", "RFP text loaded from pasted content.", tone="good")
-            st.rerun()
+                compute_all_scores()
+                set_current_step("dashboard")
+                st.rerun()
 
-        if not uploaded:
-            ui_notice("MISSING INPUT", "Upload a file or paste text first.", tone="bad")
-            st.stop()
+        # Show last uploaded info if exists
+        if rfp_state.filename:
+            st.write("")
+            st.markdown(f"**Current file:** {rfp_state.filename}")
+            st.markdown(f"**Pages detected:** {rfp_state.pages}")
 
-        data = extract_rfp_text(uploaded)
-
-        text = (data.get("text") or "").strip()
-        if not text:
-            ui_notice("ERROR", "Could not extract readable text. Try pasting it manually.", tone="bad")
-            st.stop()
-
-        ss["rfp_text"] = text
-        ss["rfp_pages"] = int(data.get("pages") or 0)
-        ss["rfp_filename"] = data.get("filename") or "Uploaded File"
-
-        # Stub meta fields (AI can later enhance these)
-        ss["rfp_meta"] = {
-            "title": "",
-            "solicitation": "",
-            "agency": "",
-            "due_date": "",
-            "submit_email": "",
-            "submission_method": "",
-        }
-
-        ss["current_page"] = "Company Info"
-        ui_notice("ANALYZED", "RFP successfully analyzed.", tone="good")
-        st.rerun()
-
-    st.markdown("---")
-    render_readiness_console(st.session_state.get("scores", {}))
+            if rfp_state.flags:
+                st.write("")
+                warn_box(" / ".join(rfp_state.flags))
