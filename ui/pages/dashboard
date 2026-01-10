@@ -1,0 +1,71 @@
+from __future__ import annotations
+
+import streamlit as st
+
+from core.scoring import compute_scores
+from ui.components import render_readiness_console, ui_notice
+
+
+def page_dashboard():
+    ss = st.session_state
+
+    st.markdown("## Dashboard")
+    st.caption("Your readiness view. No clutter — only what impacts compliance + win strength.")
+
+    # Require RFP to show real dashboard signal
+    if not (ss.get("rfp_text") or "").strip():
+        ui_notice("UPLOAD REQUIRED", "Start by uploading an RFP on the Upload page.", tone="warn")
+        return
+
+    # Live scores
+    scores = compute_scores(ss)
+
+    # Save for sidebar and console
+    ss["scores"] = scores
+
+    # Console
+    render_readiness_console(scores, build_version=ss.get("build_version", "v1"), build_date=ss.get("build_date", ""))
+
+    # Diagnostics block
+    st.markdown("### RFP Diagnostics")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("Filename", ss.get("rfp_filename") or "—")
+    with c2:
+        st.metric("Pages (est.)", ss.get("rfp_pages") or 0)
+    with c3:
+        st.metric("Characters", len(ss.get("rfp_text") or ""))
+
+    # Critical meta (placeholder until AI populates)
+    meta = ss.get("rfp_meta", {}) or {}
+    st.markdown("### Critical Submission Info")
+    b1, b2 = st.columns(2)
+    with b1:
+        st.write("**Due Date:**", meta.get("due_date") or "—")
+        st.write("**Submission Method:**", meta.get("submission_method") or "—")
+    with b2:
+        st.write("**Submit Email:**", meta.get("submit_email") or "—")
+        st.write("**Solicitation:**", meta.get("solicitation") or "—")
+
+    # Warnings (eligibility / compliance)
+    warnings = scores.get("warnings", []) or []
+    if warnings:
+        st.markdown("### Warnings")
+        for w in warnings:
+            st.warning(w)
+
+    # Quick actions
+    st.markdown("---")
+    a, b, c = st.columns(3)
+    with a:
+        if st.button("Go to Company Info", use_container_width=True):
+            ss["current_page"] = "Company Info"
+            st.rerun()
+    with b:
+        if st.button("Go to Draft Proposal", use_container_width=True):
+            ss["current_page"] = "Draft Proposal"
+            st.rerun()
+    with c:
+        if st.button("Go to Export", use_container_width=True):
+            ss["current_page"] = "Export"
+            st.rerun()
