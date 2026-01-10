@@ -1,42 +1,55 @@
 import streamlit as st
 
-from ui.components import ensure_state, inject_global_css, nav_sidebar, top_brand_bar
+from ui.components import inject_css, sidebar_nav
 from ui.pages.home import page_home
 from ui.pages.company import page_company
 from ui.pages.draft import page_draft
 from ui.pages.export import page_export
 
+APP_NAME = "Path.ai"
+BUILD_VERSION = "v1.2.0"
 
-# MUST be first Streamlit command
 st.set_page_config(
-    page_title="Path.ai – Federal Proposal Prep",
+    page_title=f"{APP_NAME} – Federal Proposal Prep",
     page_icon="🧭",
     layout="wide",
-    initial_sidebar_state="collapsed",  # keeps landing page clean
+    initial_sidebar_state="expanded",
 )
 
-APP_NAME = "Path.ai"
-BUILD_VERSION = "v1.3.0"
+inject_css()
 
-ensure_state()
-inject_global_css()
+# ---- Session defaults ----
+if "route" not in st.session_state:
+    st.session_state.route = "Dashboard"
+if "rfp" not in st.session_state:
+    st.session_state.rfp = {"text": "", "pages": 0, "filename": None}
+if "analysis" not in st.session_state:
+    st.session_state.analysis = {
+        "requirements": [],
+        "compat_rows": [],
+        "diagnostics": {"due_date": "", "submit_email": "", "notes": ""},
+        "scores": {"compliance": 0, "company": 0, "win": 0, "overall": 0},
+        "suggestions": [],
+        "eligibility": {"ok": True, "warnings": []},
+    }
+if "company" not in st.session_state:
+    st.session_state.company = {}
+if "draft" not in st.session_state:
+    st.session_state.draft = {"cover": "", "narrative": "", "outline": ""}
 
-top_brand_bar()
+# ---- Sidebar ----
+sidebar_nav(APP_NAME, BUILD_VERSION)
 
-# Landing page until analyzed
-if not st.session_state.get("analyzed", False):
+# ---- Route ----
+route = st.session_state.route
+if route == "Dashboard":
     page_home()
-    st.stop()
-
-# Guided flow after analyze
-page = nav_sidebar(APP_NAME, BUILD_VERSION)
-
-if page == "Company Info":
+elif route == "Company Info":
     page_company()
-elif page == "Draft Proposal":
+elif route == "Draft Proposal":
     page_draft()
-elif page == "Export":
+elif route == "Export":
     page_export()
 else:
-    # Default “Dashboard” view = diagnostics + scoring summary
-    page_home(show_results_only=True)
+    st.session_state.route = "Dashboard"
+    st.rerun()
