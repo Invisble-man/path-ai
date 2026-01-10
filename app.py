@@ -2,6 +2,7 @@ import io
 import json
 import re
 import base64
+import textwrap
 from dataclasses import dataclass, asdict, field
 from typing import List, Dict, Tuple, Optional, Any
 
@@ -26,205 +27,229 @@ BUILD_DATE = "Jan 10, 2026"
 
 st.set_page_config(page_title=f"{APP_NAME} – Proposal Prep", layout="wide")
 
+
+# ============================================================
+# HTML helper (prevents Streamlit Markdown code-block rendering)
+# ============================================================
+def html(block: str):
+    st.markdown(textwrap.dedent(block), unsafe_allow_html=True)
+
+
 # ============================================================
 # Styling (Rigid Futuristic)
 # ============================================================
 def inject_css():
-    st.markdown(
-        """
-        <style>
-        :root{
-          --bg: rgba(255,255,255,0.92);
-          --bd: rgba(49,51,63,0.14);
-          --tx: rgba(49,51,63,0.92);
-          --mut: rgba(49,51,63,0.66);
-          --good: rgba(34,197,94,0.18);
-          --warn: rgba(234,179,8,0.20);
-          --bad:  rgba(239,68,68,0.18);
-          --neu:  rgba(92,124,250,0.14);
-          --ink: rgba(20, 22, 30, 0.9);
-        }
+    html("""
+    <style>
+    :root{
+      --bg: rgba(255,255,255,0.92);
+      --bd: rgba(49,51,63,0.14);
+      --tx: rgba(49,51,63,0.92);
+      --mut: rgba(49,51,63,0.66);
+      --good: rgba(34,197,94,0.18);
+      --warn: rgba(234,179,8,0.20);
+      --bad:  rgba(239,68,68,0.18);
+      --neu:  rgba(92,124,250,0.14);
+      --ink: rgba(20, 22, 30, 0.9);
+    }
 
-        .block-container { padding-top: 0.75rem; padding-bottom: 2.2rem; max-width: 1180px; }
-        header[data-testid="stHeader"] { background: rgba(255,255,255,0.90); backdrop-filter: blur(8px); }
+    .block-container { padding-top: 0.75rem; padding-bottom: 2.2rem; max-width: 1180px; }
+    header[data-testid="stHeader"] { background: rgba(255,255,255,0.90); backdrop-filter: blur(8px); }
 
-        /* Top System Banner */
-        .sysbar{
-          display:flex; align-items:center; justify-content:space-between;
-          border: 1px solid var(--bd);
-          border-radius: 14px;
-          padding: 12px 14px;
-          background: linear-gradient(135deg, rgba(92,124,250,0.10), rgba(20,22,30,0.04));
-          margin-bottom: 12px;
-        }
-        .sys-left{display:flex; gap:12px; align-items:flex-start;}
-        .sys-dot{
-          width: 10px; height: 10px; border-radius: 999px;
-          background: radial-gradient(circle at 30% 30%, #22c55e, #5c7cfa);
-          margin-top: 6px;
-        }
-        .sys-title{
-          font-weight: 900;
-          letter-spacing: 0.06em;
-          text-transform: uppercase;
-          font-size: 0.84rem;
-          color: rgba(20,22,30,0.88);
-        }
-        .sys-quote{
-          font-weight: 900;
-          letter-spacing: 0.02em;
-          font-size: 1.05rem;
-          color: rgba(20,22,30,0.92);
-          margin-top: 2px;
-        }
-        .sys-sub{
-          font-size: 0.90rem;
-          color: var(--mut);
-          margin-top: 2px;
-        }
+    /* Top System Banner */
+    .sysbar{
+      display:flex; align-items:center; justify-content:space-between;
+      border: 1px solid var(--bd);
+      border-radius: 14px;
+      padding: 12px 14px;
+      background: linear-gradient(135deg, rgba(92,124,250,0.10), rgba(20,22,30,0.04));
+      margin-bottom: 12px;
+      gap: 12px;
+    }
+    .sys-left{display:flex; gap:12px; align-items:flex-start; min-width: 0;}
+    .sys-dot{
+      width: 10px; height: 10px; border-radius: 999px;
+      background: radial-gradient(circle at 30% 30%, #22c55e, #5c7cfa);
+      margin-top: 6px;
+      flex: 0 0 auto;
+    }
+    .sys-title{
+      font-weight: 900;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      font-size: 0.84rem;
+      color: rgba(20,22,30,0.88);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 64vw;
+    }
+    .sys-quote{
+      font-weight: 900;
+      letter-spacing: 0.02em;
+      font-size: 1.05rem;
+      color: rgba(20,22,30,0.92);
+      margin-top: 2px;
+    }
+    .sys-sub{
+      font-size: 0.90rem;
+      color: var(--mut);
+      margin-top: 2px;
+    }
 
-        /* Console Card */
-        .console{
-          border: 1px solid var(--bd);
-          border-radius: 16px;
-          padding: 14px 14px 12px 14px;
-          background: var(--bg);
-          margin-bottom: 12px;
-        }
-        .console h4{
-          margin: 0;
-          font-size: 0.92rem;
-          font-weight: 900;
-          letter-spacing: 0.06em;
-          text-transform: uppercase;
-          color: rgba(20,22,30,0.86);
-        }
-        .console-sub{
-          margin-top: 4px;
-          color: var(--mut);
-          font-size: 0.90rem;
-        }
-        .divider{ height: 1px; background: rgba(49,51,63,0.10); margin: 10px 0; }
+    /* Console Card */
+    .console{
+      border: 1px solid var(--bd);
+      border-radius: 16px;
+      padding: 14px 14px 12px 14px;
+      background: var(--bg);
+      margin-bottom: 12px;
+    }
+    .console h4{
+      margin: 0;
+      font-size: 0.92rem;
+      font-weight: 900;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: rgba(20,22,30,0.86);
+    }
+    .console-sub{
+      margin-top: 4px;
+      color: var(--mut);
+      font-size: 0.90rem;
+    }
+    .divider{ height: 1px; background: rgba(49,51,63,0.10); margin: 10px 0; }
 
-        /* Bars */
-        .barrow{ display:flex; align-items:center; justify-content:space-between; gap: 10px; margin: 10px 0 6px 0; }
-        .barlabel{
-          font-weight: 900;
-          letter-spacing: 0.05em;
-          text-transform: uppercase;
-          font-size: 0.78rem;
-          color: rgba(20,22,30,0.86);
-          white-space: nowrap;
-        }
-        .barmeta{
-          font-size: 0.84rem;
-          color: var(--mut);
-          white-space: nowrap;
-        }
-        .barwrap{
-          position: relative;
-          height: 12px;
-          border-radius: 999px;
-          border: 1px solid rgba(49,51,63,0.18);
-          background: rgba(20,22,30,0.04);
-          overflow: hidden;
-        }
-        .barfill{
-          height: 100%;
-          border-radius: 999px;
-        }
+    /* Bars */
+    .barrow{ display:flex; align-items:center; justify-content:space-between; gap: 10px; margin: 10px 0 6px 0; }
+    .barlabel{
+      font-weight: 900;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      font-size: 0.78rem;
+      color: rgba(20,22,30,0.86);
+      white-space: nowrap;
+    }
+    .barmeta{
+      font-size: 0.84rem;
+      color: var(--mut);
+      white-space: nowrap;
+    }
+    .barwrap{
+      position: relative;
+      height: 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(49,51,63,0.18);
+      background: rgba(20,22,30,0.04);
+      overflow: hidden;
+    }
+    .barfill{
+      height: 100%;
+      border-radius: 999px;
+    }
 
-        /* Path Walker */
-        .walker{
-          position:absolute;
-          top: -14px; /* floats above bar */
-          width: 24px;
-          height: 24px;
-          transform: translateX(-50%);
-          display:flex;
-          align-items:center;
-          justify-content:center;
-        }
-        .walker svg{ width: 22px; height: 22px; }
+    /* Path Walker */
+    .walker{
+      position:absolute;
+      top: -14px; /* floats above bar */
+      width: 24px;
+      height: 24px;
+      transform: translateX(-50%);
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      pointer-events: none;
+    }
+    .walker svg{ width: 22px; height: 22px; }
+    .walker, .walker svg{
+      max-width: 24px !important;
+      max-height: 24px !important;
+    }
 
-        /* Status chips */
-        .chip{
-          display:inline-block;
-          border: 1px solid rgba(49,51,63,0.18);
-          border-radius: 999px;
-          padding: 6px 10px;
-          font-size: 0.82rem;
-          font-weight: 900;
-          letter-spacing: 0.04em;
-          text-transform: uppercase;
-          margin-right: 8px;
-          margin-top: 6px;
-          color: rgba(20,22,30,0.86);
-          background: rgba(255,255,255,0.9);
-        }
-        .chip-good{ background: var(--good); }
-        .chip-warn{ background: var(--warn); }
-        .chip-bad{  background: var(--bad);  }
-        .chip-neu{  background: var(--neu);  }
+    /* Status chips */
+    .chip{
+      display:inline-block;
+      border: 1px solid rgba(49,51,63,0.18);
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 0.82rem;
+      font-weight: 900;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      margin-right: 8px;
+      margin-top: 6px;
+      color: rgba(20,22,30,0.86);
+      background: rgba(255,255,255,0.9);
+    }
+    .chip-good{ background: var(--good); }
+    .chip-warn{ background: var(--warn); }
+    .chip-bad{  background: var(--bad);  }
+    .chip-neu{  background: var(--neu);  }
 
-        /* Notices */
-        .notice{
-          border-radius: 14px;
-          padding: 11px 12px;
-          border: 1px solid var(--bd);
-          background: var(--bg);
-          margin: 10px 0 12px 0;
-        }
-        .notice-title{ font-weight: 900; letter-spacing:0.04em; text-transform:uppercase; margin: 0 0 4px 0; font-size: 0.80rem; color: rgba(20,22,30,0.86); }
-        .notice-body{ margin: 0; font-size: 0.93rem; color: rgba(20,22,30,0.80); }
+    /* Notices */
+    .notice{
+      border-radius: 14px;
+      padding: 11px 12px;
+      border: 1px solid var(--bd);
+      background: var(--bg);
+      margin: 10px 0 12px 0;
+    }
+    .notice-title{ font-weight: 900; letter-spacing:0.04em; text-transform:uppercase; margin: 0 0 4px 0; font-size: 0.80rem; color: rgba(20,22,30,0.86); }
+    .notice-body{ margin: 0; font-size: 0.93rem; color: rgba(20,22,30,0.80); }
 
-        .tone-good { background: var(--good); }
-        .tone-warn { background: var(--warn); }
-        .tone-bad  { background: var(--bad); }
-        .tone-neutral { background: var(--neu); }
+    .tone-good { background: var(--good); }
+    .tone-warn { background: var(--warn); }
+    .tone-bad  { background: var(--bad); }
+    .tone-neutral { background: var(--neu); }
 
-        /* Buttons */
-        .stButton>button {
-          border-radius: 12px !important;
-          padding: 0.68rem 0.95rem !important;
-          font-weight: 900 !important;
-          letter-spacing: 0.02em !important;
-        }
+    /* Buttons */
+    .stButton>button {
+      border-radius: 12px !important;
+      padding: 0.68rem 0.95rem !important;
+      font-weight: 900 !important;
+      letter-spacing: 0.02em !important;
+    }
 
-        /* Expanders */
-        div[data-testid="stExpander"] details summary p { font-size: 0.92rem; font-weight: 900; letter-spacing:0.02em; }
+    /* Expanders */
+    div[data-testid="stExpander"] details summary p { font-size: 0.92rem; font-weight: 900; letter-spacing:0.02em; }
 
-        /* Task cards */
-        .taskcard{
-          border: 1px solid rgba(49,51,63,0.14);
-          border-radius: 14px;
-          padding: 12px 12px 10px 12px;
-          background: rgba(255,255,255,0.94);
-          margin-bottom: 10px;
-        }
-        .tasktitle{
-          font-weight: 900;
-          color: rgba(20,22,30,0.90);
-          font-size: 0.95rem;
-          margin: 0;
-        }
-        .taskmeta{
-          margin-top: 4px;
-          color: var(--mut);
-          font-size: 0.86rem;
-        }
-        .taskimpact{
-          margin-top: 6px;
-          font-size: 0.82rem;
-          font-weight: 900;
-          letter-spacing: 0.04em;
-          text-transform: uppercase;
-          color: rgba(20,22,30,0.78);
-        }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
+    /* Task cards */
+    .taskcard{
+      border: 1px solid rgba(49,51,63,0.14);
+      border-radius: 14px;
+      padding: 12px 12px 10px 12px;
+      background: rgba(255,255,255,0.94);
+      margin-bottom: 10px;
+    }
+    .tasktitle{
+      font-weight: 900;
+      color: rgba(20,22,30,0.90);
+      font-size: 0.95rem;
+      margin: 0;
+    }
+    .taskmeta{
+      margin-top: 4px;
+      color: var(--mut);
+      font-size: 0.86rem;
+    }
+    .taskimpact{
+      margin-top: 6px;
+      font-size: 0.82rem;
+      font-weight: 900;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: rgba(20,22,30,0.78);
+    }
+
+    /* Mobile fit */
+    @media (max-width: 700px){
+      .block-container { padding-left: 0.7rem; padding-right: 0.7rem; }
+      .sysbar{ flex-direction: column; align-items: stretch; }
+      .sys-title{ max-width: 100%; }
+    }
+    </style>
+    """)
+
 
 def ui_notice(title: str, body: str, tone: str = "neutral"):
     tone_class = {
@@ -234,15 +259,13 @@ def ui_notice(title: str, body: str, tone: str = "neutral"):
         "bad": "tone-bad",
     }.get(tone, "tone-neutral")
 
-    st.markdown(
-        f"""
-        <div class="notice {tone_class}">
-            <div class="notice-title">{title}</div>
-            <p class="notice-body">{body}</p>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+    html(f"""
+    <div class="notice {tone_class}">
+      <div class="notice-title">{title}</div>
+      <p class="notice-body">{body}</p>
+    </div>
+    """)
+
 
 inject_css()
 
@@ -251,7 +274,15 @@ inject_css()
 # ============================================================
 GATING_LABELS = ["ACTIONABLE", "INFORMATIONAL", "IRRELEVANT", "AUTO_RESOLVED"]
 
-DEFAULT_SECTIONS = ["Cover Letter", "Executive Summary", "Technical Approach", "Management Plan", "Past Performance", "Compliance Snapshot"]
+DEFAULT_SECTIONS = [
+    "Cover Letter",
+    "Executive Summary",
+    "Technical Approach",
+    "Management Plan",
+    "Past Performance",
+    "Compliance Snapshot"
+]
+
 
 @dataclass
 class ProposalItem:
@@ -262,19 +293,21 @@ class ProposalItem:
     bucket: str
     gating_label: str
     confidence: float
-    status: str = "Unknown"          # for requirement items only
+    status: str = "Unknown"  # for requirement items only
     notes: str = ""
     mapped_section: str = ""
-    display_title: str = ""          # cleaned, user-facing
-    display_detail: str = ""         # concise detail (optional)
-    priority: str = "NORMAL"         # CRITICAL/HIGH/NORMAL/OPTIONAL
-    impact: str = "SCORE"            # COMPLIANCE/SCORE/READINESS
+    display_title: str = ""  # cleaned, user-facing
+    display_detail: str = ""  # concise detail (optional)
+    priority: str = "NORMAL"  # CRITICAL/HIGH/NORMAL/OPTIONAL
+    impact: str = "SCORE"  # COMPLIANCE/SCORE/READINESS
+
 
 # ============================================================
 # Helpers
 # ============================================================
 def normalize_line(line: str) -> str:
     return re.sub(r"\s+", " ", (line or "")).strip()
+
 
 def scan_lines(text: str, max_lines: int = 12000) -> List[str]:
     out = []
@@ -286,6 +319,7 @@ def scan_lines(text: str, max_lines: int = 12000) -> List[str]:
             break
     return out
 
+
 def unique_keep_order(items: List[str]) -> List[str]:
     seen = set()
     out = []
@@ -296,13 +330,12 @@ def unique_keep_order(items: List[str]) -> List[str]:
             out.append(x)
     return out
 
+
 def clamp_pct(x: float) -> int:
     return int(max(0, min(100, round(x))))
 
+
 def pct_color(p: int) -> Tuple[str, str]:
-    """
-    Returns (hex-ish css color name, chip class)
-    """
     if p < 50:
         return "#ef4444", "chip-bad"
     if p < 70:
@@ -311,6 +344,7 @@ def pct_color(p: int) -> Tuple[str, str]:
         return "#eab308", "chip-warn"
     return "#22c55e", "chip-good"
 
+
 def grade_from_pct(p: int) -> str:
     if p >= 90: return "A"
     if p >= 80: return "B"
@@ -318,10 +352,12 @@ def grade_from_pct(p: int) -> str:
     if p >= 60: return "D"
     return "F"
 
+
 def safe_no_insert(text: str) -> bool:
     t = (text or "").lower()
     banned = ["insert ", "tbd", "[", "]", "lorem ipsum", "fill in", "placeholder"]
     return not any(b in t for b in banned)
+
 
 # ============================================================
 # Text extraction
@@ -349,9 +385,11 @@ def extract_text_from_pdf(file_bytes: bytes) -> Tuple[str, Dict[str, Any]]:
 
     return out, diag
 
+
 def extract_text_from_docx(file_bytes: bytes) -> str:
     document = docx.Document(io.BytesIO(file_bytes))
     return "\n".join([p.text for p in document.paragraphs if p.text]).strip()
+
 
 def read_uploaded_file(uploaded_file) -> Tuple[str, Dict[str, Any]]:
     if not uploaded_file:
@@ -375,6 +413,7 @@ def read_uploaded_file(uploaded_file) -> Tuple[str, Dict[str, Any]]:
 
     diag = {"file_type": "text", "pages_total": None, "pages_with_text": None, "chars_extracted": len(text), "likely_scanned": False}
     return text, diag
+
 
 # ============================================================
 # Detection heuristics (minimal, relevance-first)
@@ -407,12 +446,14 @@ ATTACHMENT_KEYWORDS = [
     "spreadsheet", "xlsx", "excel",
 ]
 
+
 def find_forms(text: str) -> List[str]:
     found = []
     for pat, label in FORM_PATTERNS:
         if re.search(pat, text or "", re.IGNORECASE):
             found.append(label)
     return unique_keep_order(found)
+
 
 def detect_submission_rules(text: str) -> Dict[str, List[str]]:
     lines = scan_lines(text)
@@ -425,6 +466,7 @@ def detect_submission_rules(text: str) -> Dict[str, List[str]]:
         grouped[k] = unique_keep_order(grouped[k])[:10]
     return grouped
 
+
 def find_attachment_lines(text: str) -> List[str]:
     lines = scan_lines(text)
     hits = []
@@ -435,10 +477,12 @@ def find_attachment_lines(text: str) -> List[str]:
                 hits.append(line)
     return unique_keep_order(hits)
 
+
 def detect_amendment_lines(text: str) -> List[str]:
     lines = scan_lines(text)
     hits = [l for l in lines if re.search(AMENDMENT_PATTERN, l, re.IGNORECASE)]
     return unique_keep_order(hits)[:20]
+
 
 def extract_requirements_best_effort(rfp_text: str, max_reqs: int = 70) -> List[str]:
     lines = scan_lines(rfp_text, max_lines=12000)
@@ -460,6 +504,7 @@ def extract_requirements_best_effort(rfp_text: str, max_reqs: int = 70) -> List[
                 break
     return reqs
 
+
 def auto_map_section(req_text: str) -> str:
     t = (req_text or "").lower()
     if "past performance" in t or "cpars" in t:
@@ -473,6 +518,7 @@ def auto_map_section(req_text: str) -> str:
     if "cover letter" in t or "signed" in t or "signature" in t:
         return "Cover Letter"
     return "Technical Approach"
+
 
 # ============================================================
 # Company info
@@ -510,8 +556,10 @@ class CompanyInfo:
             d["certifications"] = []
         return d
 
+
 CRITICAL_FIELDS = ["legal_name", "uei", "poc_name", "poc_email", "proposal_title", "solicitation_number", "agency_customer"]
 RECOMMENDED_FIELDS = ["address", "poc_phone", "capabilities", "differentiators"]
+
 
 def company_completeness(company: CompanyInfo) -> int:
     c = company
@@ -521,9 +569,9 @@ def company_completeness(company: CompanyInfo) -> int:
     crit_done = sum(1 for f in CRITICAL_FIELDS if getattr(c, f, "").strip())
     rec_done = sum(1 for f in RECOMMENDED_FIELDS if getattr(c, f, "").strip())
 
-    # Critical is dominant
     pct = (crit_done / max(1, crit_total)) * 80 + (rec_done / max(1, rec_total)) * 20
     return clamp_pct(pct)
+
 
 def missing_critical(company: CompanyInfo) -> List[str]:
     miss = []
@@ -531,6 +579,7 @@ def missing_critical(company: CompanyInfo) -> List[str]:
         if not getattr(company, f, "").strip():
             miss.append(f)
     return miss
+
 
 # ============================================================
 # AI (OpenAI) — minimal, reliable
@@ -543,6 +592,7 @@ def get_openai_key() -> Optional[str]:
         pass
     import os
     return os.environ.get("OPENAI_API_KEY")
+
 
 def extract_json_object(s: str) -> Optional[dict]:
     if not s:
@@ -557,7 +607,7 @@ def extract_json_object(s: str) -> Optional[dict]:
     start = s.find("{")
     end = s.rfind("}")
     if start >= 0 and end > start:
-        candidate = s[start : end + 1]
+        candidate = s[start: end + 1]
         try:
             obj = json.loads(candidate)
             if isinstance(obj, dict):
@@ -565,6 +615,7 @@ def extract_json_object(s: str) -> Optional[dict]:
         except Exception:
             return None
     return None
+
 
 def openai_response_json(system: str, user: str, model: str, timeout: int = 30, max_output_tokens: int = 900, temperature: float = 0.1) -> Optional[dict]:
     api_key = get_openai_key()
@@ -603,6 +654,7 @@ def openai_response_json(system: str, user: str, model: str, timeout: int = 30, 
         return extract_json_object(raw)
     except Exception:
         return None
+
 
 def heuristic_gate_item(text: str, kind: str) -> Tuple[str, float, str]:
     low = (text or "").lower()
@@ -643,6 +695,7 @@ def heuristic_gate_item(text: str, kind: str) -> Tuple[str, float, str]:
         return "ACTIONABLE", 0.66, bucket
 
     return "INFORMATIONAL", 0.60, bucket
+
 
 def ai_gate_item(text: str, kind: str, context_hint: str = "") -> Tuple[str, float, str]:
     h_label, h_conf, h_bucket = heuristic_gate_item(text, kind)
@@ -686,6 +739,7 @@ text: {text}
         return h_label, h_conf, h_bucket
     cf = max(0.0, min(1.0, cf))
     return gl, cf, (bk or h_bucket)
+
 
 def ai_write_drafts(company: CompanyInfo, rfp_text: str) -> Optional[Dict[str, str]]:
     if not st.session_state.get("ai_enabled", False):
@@ -734,11 +788,11 @@ RFP excerpt:
         return None
 
     out = {k: str(j[k]).strip() for k in keys}
-    # Enforce no placeholder language in final drafts
     for k, v in out.items():
         if not v or not safe_no_insert(v):
             return None
     return out
+
 
 # ============================================================
 # Relevance-only task cleaning
@@ -747,10 +801,11 @@ def task_rewrite_basic(kind: str, raw: str) -> Tuple[str, str]:
     t = normalize_line(raw)
     low = t.lower()
 
-    # Remove obvious raw prefixes
-    t = re.sub(r"^(Page Limit|Font Requirement|Margin Requirement|Due Date/Deadline|Submission Method|File Format Rules|Sections L/M referenced)\s*:\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(
+        r"^(Page Limit|Font Requirement|Margin Requirement|Due Date/Deadline|Submission Method|File Format Rules|Sections L/M referenced)\s*:\s*",
+        "", t, flags=re.IGNORECASE
+    )
 
-    # Titles
     if kind == "rule":
         if "page" in low and "limit" in low:
             return ("Confirm page limit compliance", t[:220])
@@ -778,26 +833,23 @@ def task_rewrite_basic(kind: str, raw: str) -> Tuple[str, str]:
         return ("Review amendments and incorporate changes", t[:220])
 
     if kind == "field_missing":
-        # raw is already readable
         return ("Complete required company profile fields", t[:220])
 
     if kind == "requirement":
-        # Convert long requirement to concise action
         if "shall" in low or "must" in low or "will" in low:
-            # Keep first clause
             short = t
             short = re.sub(r"\s{2,}", " ", short)
             if len(short) > 220:
                 short = short[:217] + "..."
             return ("Address a mandatory requirement", short)
-        short = t[:220]
-        return ("Address a requirement", short)
+        return ("Address a requirement", t[:220])
 
     return ("Action required", t[:220])
 
+
 def classify_priority_impact(kind: str, raw: str) -> Tuple[str, str]:
     low = (raw or "").lower()
-    # impact
+
     if kind in ["requirement", "rule", "form", "amendment"]:
         impact = "COMPLIANCE"
     elif kind == "field_missing":
@@ -805,7 +857,6 @@ def classify_priority_impact(kind: str, raw: str) -> Tuple[str, str]:
     else:
         impact = "SCORE"
 
-    # priority
     priority = "NORMAL"
     if any(k in low for k in ["due date", "deadline", "no later than", "offers are due", "proposal is due"]):
         priority = "CRITICAL"
@@ -817,7 +868,9 @@ def classify_priority_impact(kind: str, raw: str) -> Tuple[str, str]:
         priority = "HIGH"
     if kind == "rule" and any(k in low for k in ["page limit", "font", "margins", "file format"]):
         priority = "HIGH"
+
     return priority, impact
+
 
 # ============================================================
 # Build items
@@ -839,6 +892,7 @@ def build_items_from_analysis(
         gl, cf, bucket = ai_gate_item(text=text, kind=kind, context_hint=context_hint)
         title, detail = task_rewrite_basic(kind, text)
         pr, imp = classify_priority_impact(kind, text)
+
         items.append(
             ProposalItem(
                 id=f"I{seq:04d}",
@@ -856,7 +910,6 @@ def build_items_from_analysis(
         )
         seq += 1
 
-    # Rules as actionable tasks (only key lines)
     for label, lines in (rules or {}).items():
         for ln in lines:
             add("rule", f"{label}: {ln}", "Submission Rules", "Submission compliance rules")
@@ -873,12 +926,10 @@ def build_items_from_analysis(
     for req in (requirements or []):
         add("requirement", req, "RFP", "Compliance requirement")
 
-    # Missing critical company fields become readiness tasks (not hard blocks)
     miss = missing_critical(company)
     for f in miss:
         add("field_missing", f"Missing required company field: {f.replace('_',' ').title()}", "Company Profile", "Missing company field")
 
-    # De-dupe
     out = []
     seen = set()
     for it in items:
@@ -887,7 +938,6 @@ def build_items_from_analysis(
             seen.add(k)
             out.append(it)
 
-    # Map requirement sections
     for it in out:
         if it.kind == "requirement":
             it.mapped_section = auto_map_section(it.text)
@@ -895,8 +945,10 @@ def build_items_from_analysis(
 
     return out
 
+
 def get_actionable_items(items: List[ProposalItem]) -> List[ProposalItem]:
     return [i for i in (items or []) if i.gating_label == "ACTIONABLE"]
+
 
 # ============================================================
 # Scoring Engine (Locked rules)
@@ -908,7 +960,6 @@ def compliance_score(items: List[ProposalItem]) -> int:
     reqs = [i for i in (items or []) if i.kind == "requirement" and i.gating_label == "ACTIONABLE"]
     if not reqs:
         return 0
-    # Pass=1.0, Unknown=0.5, Fail=0.0
     total = 0.0
     for r in reqs:
         if r.status == "Pass":
@@ -920,12 +971,14 @@ def compliance_score(items: List[ProposalItem]) -> int:
     pct = (total / max(1, len(reqs))) * 100
     return clamp_pct(pct)
 
+
 def tasks_score(items: List[ProposalItem], checks: Dict[str, bool]) -> int:
     act = get_actionable_items(items)
     if not act:
         return 0
     done = sum(1 for i in act if checks.get(i.id, False))
     return clamp_pct((done / max(1, len(act))) * 100)
+
 
 def drafts_score(drafts: Dict[str, str]) -> int:
     if not drafts:
@@ -938,22 +991,21 @@ def drafts_score(drafts: Dict[str, str]) -> int:
             present += 1
     return clamp_pct((present / max(1, len(keys))) * 100)
 
+
 def overall_progress_score(items: List[ProposalItem], checks: Dict[str, bool], company: CompanyInfo, drafts: Dict[str, str]) -> int:
-    # Overall = Tasks(60) + Company(20) + Drafts(20)
     t = tasks_score(items, checks)
     c = company_completeness(company)
     d = drafts_score(drafts)
     pct = (t * 0.60) + (c * 0.20) + (d * 0.20)
     return clamp_pct(pct)
 
+
 def win_ability_score(company: CompanyInfo, drafts: Dict[str, str], rfp_text: str) -> int:
-    # Informational only
     score = 0
     if company.differentiators.strip(): score += 25
     if company.capabilities.strip(): score += 20
     if company.past_performance.strip(): score += 15
     if drafts_score(drafts) >= 60: score += 20
-    # SOW match: simple heuristic on overlap
     if rfp_text and company.capabilities:
         a = set(re.findall(r"[a-z]{4,}", rfp_text.lower()[:4000]))
         b = set(re.findall(r"[a-z]{4,}", company.capabilities.lower()))
@@ -963,6 +1015,7 @@ def win_ability_score(company: CompanyInfo, drafts: Dict[str, str], rfp_text: st
         elif overlap >= 8: score += 6
     return clamp_pct(score)
 
+
 def ready_state(overall: int, compliance: int) -> str:
     if compliance >= 80 and overall >= 60:
         return "READY"
@@ -970,8 +1023,10 @@ def ready_state(overall: int, compliance: int) -> str:
         return "ALMOST"
     return "NOT READY"
 
+
 def export_allowed(overall: int, compliance: int) -> bool:
     return (overall >= 60) and (compliance >= 80)
+
 
 # ============================================================
 # DOCX export helpers
@@ -985,6 +1040,7 @@ def add_field(paragraph, field_code: str):
     fldChar3 = OxmlElement('w:fldChar'); fldChar3.set(qn('w:fldCharType'), 'end')
     r.append(fldChar1); r.append(instrText); r.append(fldChar2); r.append(fldChar3)
 
+
 def add_page_numbers(doc: docx.Document):
     section = doc.sections[0]
     footer = section.footer
@@ -992,12 +1048,14 @@ def add_page_numbers(doc: docx.Document):
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p.add_run("Page "); add_field(p, "PAGE"); p.add_run(" of "); add_field(p, "NUMPAGES")
 
+
 def add_table_of_contents(doc: docx.Document):
     doc.add_page_break()
     doc.add_heading("Table of Contents", level=1)
     p = doc.add_paragraph()
     add_field(p, r'TOC \o "1-3" \z \u')
     doc.add_page_break()
+
 
 def add_title_page(doc: docx.Document, company: CompanyInfo, logo_bytes: Optional[bytes]):
     doc.add_paragraph("")
@@ -1034,9 +1092,11 @@ def add_title_page(doc: docx.Document, company: CompanyInfo, logo_bytes: Optiona
 
     doc.add_page_break()
 
+
 def add_paragraph_lines(doc: docx.Document, text: str):
     for line in (text or "").splitlines():
         doc.add_paragraph(line)
+
 
 def build_docx_package(company: CompanyInfo, logo_bytes: Optional[bytes], diag: Dict[str, Any],
                        items: List[ProposalItem], drafts: Dict[str, str], rules: Dict[str, List[str]],
@@ -1084,6 +1144,7 @@ def build_docx_package(company: CompanyInfo, logo_bytes: Optional[bytes], diag: 
     doc.save(buf)
     return buf.getvalue()
 
+
 def build_matrix_csv(items: List[ProposalItem]) -> str:
     rows = ["id,kind,bucket,gating_label,confidence,status,mapped_section,display_title,display_detail,text,notes"]
     for it in items:
@@ -1100,6 +1161,7 @@ def build_matrix_csv(items: List[ProposalItem]) -> str:
         rows.append(",".join(row))
     return "\n".join(rows)
 
+
 # ============================================================
 # Persistence
 # ============================================================
@@ -1108,6 +1170,7 @@ def b64_from_bytes(b: Optional[bytes]) -> Optional[str]:
         return None
     return base64.b64encode(b).decode("utf-8")
 
+
 def bytes_from_b64(s: Optional[str]) -> Optional[bytes]:
     if not s:
         return None
@@ -1115,6 +1178,7 @@ def bytes_from_b64(s: Optional[str]) -> Optional[bytes]:
         return base64.b64decode(s.encode("utf-8"))
     except Exception:
         return None
+
 
 def export_project_json() -> str:
     c: CompanyInfo = st.session_state["company"]
@@ -1137,6 +1201,7 @@ def export_project_json() -> str:
         "step": st.session_state["step"],
     }
     return json.dumps(payload, indent=2)
+
 
 def import_project_json(s: str) -> Tuple[bool, str]:
     try:
@@ -1172,12 +1237,14 @@ def import_project_json(s: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Could not load project: {e}"
 
+
 # ============================================================
 # Session init
 # ============================================================
 def ss_init(key: str, value):
     if key not in st.session_state:
         st.session_state[key] = value
+
 
 ss_init("rfp_text", "")
 ss_init("rfp_diag", {})
@@ -1195,11 +1262,11 @@ ss_init("ai_enabled", False)
 ss_init("ai_model", "gpt-4.1-mini")
 ss_init("step", 0)
 
+
 # ============================================================
 # System banner + readiness console + path walker bar
 # ============================================================
 def walker_svg(color: str) -> str:
-    # Minimal geometric human icon (rigid, not cartoon)
     return f"""
     <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
       <circle cx="12" cy="5.5" r="2.5" fill="{color}"/>
@@ -1211,6 +1278,7 @@ def walker_svg(color: str) -> str:
     </svg>
     """
 
+
 def render_console(items: List[ProposalItem], checks: Dict[str, bool], company: CompanyInfo, drafts: Dict[str, str], rfp_text: str):
     comp = compliance_score(items)
     overall = overall_progress_score(items, checks, company, drafts)
@@ -1219,10 +1287,10 @@ def render_console(items: List[ProposalItem], checks: Dict[str, bool], company: 
     state = ready_state(overall, comp)
 
     comp_grade = grade_from_pct(comp)
-    comp_color, comp_chip = pct_color(comp)
-    overall_color, overall_chip = pct_color(overall)
-    company_color, company_chip = pct_color(company_pct)
-    win_color, win_chip = pct_color(win)
+    comp_color, _ = pct_color(comp)
+    overall_color, _ = pct_color(overall)
+    company_color, _ = pct_color(company_pct)
+    win_color, _ = pct_color(win)
 
     exp = "UNLOCKED" if export_allowed(overall, comp) else "LOCKED"
     exp_chip = "chip-good" if exp == "UNLOCKED" else "chip-bad"
@@ -1230,68 +1298,59 @@ def render_console(items: List[ProposalItem], checks: Dict[str, bool], company: 
     state_text = {"READY": "READY", "ALMOST": "ALMOST READY", "NOT READY": "NOT READY"}[state]
     state_chip = "chip-good" if state == "READY" else ("chip-warn" if state == "ALMOST" else "chip-bad")
 
-    # Top system banner
-    st.markdown(
-        f"""
-        <div class="sysbar">
-          <div class="sys-left">
-            <div class="sys-dot"></div>
-            <div>
-              <div class="sys-title">PATH STATUS: ACTIVE • {BUILD_VERSION} • {BUILD_DATE}</div>
-              <div class="sys-quote">YOU ARE NOW ON THE PATH TO SUCCESS!</div>
-              <div class="sys-sub">System-guided. Compliance-first. Submission-ready.</div>
-            </div>
-          </div>
-          <div style="text-align:right;">
-            <span class="chip {state_chip}">READY STATE: {state_text}</span>
-            <span class="chip {exp_chip}">EXPORT: {exp}</span>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    # Readiness Console
     def bar_html(label: str, pct: int, meta: str, color: str, walker: bool = False) -> str:
-        left = max(2, min(98, pct))  # keep walker visible
+        left = max(2, min(98, pct))
         walker_block = ""
         if walker:
             walker_block = f"""
-              <div class="walker" style="left:{left}%;">
-                {walker_svg(color)}
-              </div>
+            <div class="walker" style="left:{left}%;">
+              {walker_svg(color)}
+            </div>
             """
-        return f"""
+        return textwrap.dedent(f"""
         <div class="barrow">
           <div class="barlabel">{label}</div>
           <div class="barmeta">{meta}</div>
         </div>
         <div class="barwrap">
           <div class="barfill" style="width:{pct}%; background:{color};"></div>
-          {walker_block}
+          {textwrap.dedent(walker_block).strip()}
         </div>
-        """
+        """)
 
-    st.markdown(
-        f"""
-        <div class="console">
-          <h4>Readiness Console</h4>
-          <div class="console-sub">Only unresolved items that affect readiness are shown.</div>
-          <div class="divider"></div>
-
-          {bar_html("Compliance", comp, f"{comp}% • Grade {comp_grade}", comp_color, walker=False)}
-          {bar_html("Company Profile", company_pct, f"{company_pct}%", company_color, walker=False)}
-          {bar_html("Win Strength", win, f"{win}%", win_color, walker=False)}
-
-          <div class="divider"></div>
-
-          {bar_html("Overall Progress", overall, f"{overall}%", overall_color, walker=True)}
+    html(f"""
+    <div class="sysbar">
+      <div class="sys-left">
+        <div class="sys-dot"></div>
+        <div>
+          <div class="sys-title">PATH STATUS: ACTIVE • {BUILD_VERSION} • {BUILD_DATE}</div>
+          <div class="sys-quote">YOU ARE NOW ON THE PATH TO SUCCESS!</div>
+          <div class="sys-sub">System-guided. Compliance-first. Submission-ready.</div>
         </div>
-        """,
-        unsafe_allow_html=True
-    )
+      </div>
+      <div style="text-align:right;">
+        <span class="chip {state_chip}">READY STATE: {state_text}</span>
+        <span class="chip {exp_chip}">EXPORT: {exp}</span>
+      </div>
+    </div>
+    """)
 
-    # If blocked, show reasons (no internal jargon)
+    html(f"""
+    <div class="console">
+      <h4>Readiness Console</h4>
+      <div class="console-sub">Only unresolved items that affect readiness are shown.</div>
+      <div class="divider"></div>
+
+      {bar_html("Compliance", comp, f"{comp}% • Grade {comp_grade}", comp_color, walker=False)}
+      {bar_html("Company Profile", company_pct, f"{company_pct}%", company_color, walker=False)}
+      {bar_html("Win Strength", win, f"{win}%", win_color, walker=False)}
+
+      <div class="divider"></div>
+
+      {bar_html("Overall Progress", overall, f"{overall}%", overall_color, walker=True)}
+    </div>
+    """)
+
     if not export_allowed(overall, comp):
         reasons = []
         if comp < 80:
@@ -1302,6 +1361,7 @@ def render_console(items: List[ProposalItem], checks: Dict[str, bool], company: 
             ui_notice("EXPORT LOCKED", " • ".join(reasons), tone="warn")
 
     return comp, overall, company_pct, win, state
+
 
 # ============================================================
 # Sidebar
@@ -1329,46 +1389,20 @@ with st.sidebar.expander("Project", expanded=False):
 
 steps = ["Intake", "Company", "Fix", "Draft", "Export"]
 chosen = st.sidebar.radio("Navigate", options=list(range(len(steps))), format_func=lambda i: steps[i], index=st.session_state["step"])
+st.session_state["step"] = chosen
 
-def can_enter_step(target_step: int) -> Tuple[bool, str]:
-    if target_step <= 0:
-        return True, ""
-    if target_step >= 1:
-        if not st.session_state["rfp_text"].strip() or not st.session_state["analysis_done"]:
-            return False, "Run Intake → Analyze."
-    if target_step >= 2:
-        # No hard blocks; allow entry
-        return True, ""
-    if target_step >= 3:
-        if not st.session_state.get("ai_enabled", False):
-            return False, "Enable AI drafts in sidebar."
-    if target_step >= 4:
-        if not (st.session_state["drafts"] or {}):
-            return False, "Generate drafts first."
-    return True, ""
-
-allowed, why = can_enter_step(chosen)
-if not allowed:
-    ui_notice("STATUS", why, tone="warn")
-    chosen = st.session_state["step"]
-else:
-    st.session_state["step"] = chosen
-
-# Nav buttons
+# Nav buttons (never hard-block navigation; only disable actions inside pages)
 col_nav1, col_nav2, col_nav3 = st.columns([1, 1, 6])
 with col_nav1:
     if st.button("Back", use_container_width=True, disabled=(st.session_state["step"] == 0)):
         st.session_state["step"] = max(0, st.session_state["step"] - 1)
         st.rerun()
 with col_nav2:
-    nxt = min(len(steps) - 1, st.session_state["step"] + 1)
-    ok_next, why_next = can_enter_step(nxt)
-    if st.button("Continue", use_container_width=True, disabled=not ok_next):
-        st.session_state["step"] = nxt
+    if st.button("Continue", use_container_width=True, disabled=(st.session_state["step"] == len(steps) - 1)):
+        st.session_state["step"] = min(len(steps) - 1, st.session_state["step"] + 1)
         st.rerun()
 with col_nav3:
-    if not ok_next and st.session_state["step"] < len(steps) - 1:
-        st.caption(why_next)
+    st.caption("Navigate freely. Scores and export unlock as you complete requirements.")
 
 # Render banner + console (always)
 _ = render_console(
@@ -1378,6 +1412,7 @@ _ = render_console(
     drafts=st.session_state["drafts"] or {},
     rfp_text=st.session_state["rfp_text"] or ""
 )
+
 
 # ============================================================
 # Pages
@@ -1441,23 +1476,21 @@ def page_intake():
         diag = st.session_state["rfp_diag"] or {}
         if diag:
             scanned = "YES" if diag.get("likely_scanned") else "NO"
-            st.markdown(
-                f"""
-                <div class="console">
-                  <h4>Input Signal</h4>
-                  <div class="divider"></div>
-                  <div class="console-sub"><b>Type</b>: {diag.get('file_type','—')}</div>
-                  <div class="console-sub"><b>Pages</b>: {diag.get('pages_total','—')} • <b>Pages w/ text</b>: {diag.get('pages_with_text','—')}</div>
-                  <div class="console-sub"><b>Chars</b>: {diag.get('chars_extracted','—')}</div>
-                  <div class="console-sub"><b>Scanned</b>: {scanned}</div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+            html(f"""
+            <div class="console">
+              <h4>Input Signal</h4>
+              <div class="divider"></div>
+              <div class="console-sub"><b>Type</b>: {diag.get('file_type','—')}</div>
+              <div class="console-sub"><b>Pages</b>: {diag.get('pages_total','—')} • <b>Pages w/ text</b>: {diag.get('pages_with_text','—')}</div>
+              <div class="console-sub"><b>Chars</b>: {diag.get('chars_extracted','—')}</div>
+              <div class="console-sub"><b>Scanned</b>: {scanned}</div>
+            </div>
+            """)
             if diag.get("likely_scanned"):
                 ui_notice("SIGNAL WARNING", "Paste solicitation text for maximum accuracy.", tone="warn")
         else:
             ui_notice("STATUS", "No input diagnostics yet.", tone="neutral")
+
 
 def page_company():
     st.subheader("COMPANY PROFILE")
@@ -1501,7 +1534,7 @@ def page_company():
 
     miss = missing_critical(c)
     if miss:
-        ui_notice("STATUS", f"Missing required fields: " + " • ".join([m.replace('_',' ').title() for m in miss]), tone="warn")
+        ui_notice("STATUS", "Missing required fields: " + " • ".join([m.replace('_',' ').title() for m in miss]), tone="warn")
     else:
         ui_notice("STATUS", "Required fields captured.", tone="good")
 
@@ -1522,25 +1555,28 @@ def page_company():
                 checks.setdefault(it.id, False)
             st.session_state["task_checks"] = checks
             ui_notice("STATUS", "Fix list refreshed.", tone="good")
+        else:
+            ui_notice("STATUS", "Run Intake → Analyze first.", tone="warn")
+
 
 def page_fix():
     st.subheader("FIX MODE")
 
+    if not st.session_state["analysis_done"] or not (st.session_state["rfp_text"] or "").strip():
+        ui_notice("STATUS", "Run Intake → Analyze to generate a fix list.", tone="warn")
+        return
+
     items = st.session_state["items"] or []
     if not items:
-        ui_notice("STATUS", "Run Intake → Analyze.", tone="warn")
+        ui_notice("STATUS", "No items found. Try re-running Analyze.", tone="warn")
         return
 
     checks = st.session_state["task_checks"] or {}
 
-    # Only show items that matter to fix: actionable + unresolved
     actionable = get_actionable_items(items)
     unresolved = [i for i in actionable if not checks.get(i.id, False)]
-
-    # Hide noise: only show tasks that affect compliance/readiness/score
     show = [i for i in unresolved if i.impact in ["COMPLIANCE", "READINESS", "SCORE"]]
 
-    # Priority order
     pr_order = {"CRITICAL": 0, "HIGH": 1, "NORMAL": 2, "OPTIONAL": 3}
     show.sort(key=lambda x: (pr_order.get(x.priority, 9), x.bucket, x.id))
 
@@ -1548,7 +1584,6 @@ def page_fix():
         ui_notice("STATUS", "No fix items remaining.", tone="good")
         return
 
-    # Group by priority first, then bucket
     priorities = ["CRITICAL", "HIGH", "NORMAL", "OPTIONAL"]
     for pr in priorities:
         grp = [i for i in show if i.priority == pr]
@@ -1556,7 +1591,6 @@ def page_fix():
             continue
 
         with st.expander(f"{pr} ({len(grp)})", expanded=(pr in ["CRITICAL", "HIGH"])):
-            # bucket group within priority
             buckets = unique_keep_order([g.bucket for g in grp])
             for b in buckets:
                 bucket_items = [g for g in grp if g.bucket == b]
@@ -1570,21 +1604,16 @@ def page_fix():
                     detail = it.display_detail or ""
                     impact = it.impact
 
-                    st.markdown(
-                        f"""
-                        <div class="taskcard">
-                          <p class="tasktitle">{title}</p>
-                          <div class="taskmeta">{detail}</div>
-                          <div class="taskimpact">Impact: {impact} • Priority: {it.priority}</div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True
-                    )
+                    html(f"""
+                    <div class="taskcard">
+                      <p class="tasktitle">{title}</p>
+                      <div class="taskmeta">{detail}</div>
+                      <div class="taskimpact">Impact: {impact} • Priority: {it.priority}</div>
+                    </div>
+                    """)
 
-                    # Single resolve control
                     checks[it.id] = st.checkbox("Resolved", value=checks.get(it.id, False), key=f"resolve_{it.id}")
 
-                    # Requirement controls (only when relevant)
                     if it.kind == "requirement":
                         cols = st.columns([1, 1.2, 2])
                         with cols[0]:
@@ -1608,8 +1637,15 @@ def page_fix():
 
     st.session_state["task_checks"] = checks
 
+
 def page_draft():
     st.subheader("DRAFT SYSTEM")
+
+    if not st.session_state["analysis_done"] or not (st.session_state["rfp_text"] or "").strip():
+        ui_notice("STATUS", "Run Intake → Analyze first (drafts mirror the SOW/RFP).", tone="warn")
+
+    if not st.session_state["ai_enabled"]:
+        ui_notice("STATUS", "Enable AI Drafts in the sidebar to generate proposal sections.", tone="warn")
 
     c: CompanyInfo = st.session_state["company"]
     miss = missing_critical(c)
@@ -1619,12 +1655,15 @@ def page_draft():
     col1, col2 = st.columns([1, 1])
     with col1:
         if st.button("GENERATE DRAFTS", use_container_width=True, disabled=not st.session_state["ai_enabled"]):
-            d = ai_write_drafts(company=c, rfp_text=st.session_state["rfp_text"])
-            if d:
-                st.session_state["drafts"] = d
-                ui_notice("STATUS", "Drafts generated.", tone="good")
+            if not (st.session_state["rfp_text"] or "").strip():
+                ui_notice("STATUS", "Paste/upload the RFP text first (Intake).", tone="bad")
             else:
-                ui_notice("STATUS", "Draft generation failed.", tone="bad")
+                d = ai_write_drafts(company=c, rfp_text=st.session_state["rfp_text"])
+                if d:
+                    st.session_state["drafts"] = d
+                    ui_notice("STATUS", "Drafts generated.", tone="good")
+                else:
+                    ui_notice("STATUS", "Draft generation failed.", tone="bad")
     with col2:
         if st.button("CLEAR DRAFTS", use_container_width=True):
             st.session_state["drafts"] = {}
@@ -1640,14 +1679,17 @@ def page_draft():
             with st.expander(k, expanded=(k == "Executive Summary")):
                 drafts[k] = st.text_area(k, value=drafts[k], height=260)
 
-    # Enforce no placeholders saved
     for k, v in drafts.items():
         if v and not safe_no_insert(v):
             ui_notice("STATUS", f"{k} contains placeholder language. Remove it.", tone="warn")
     st.session_state["drafts"] = drafts
 
+
 def page_export():
     st.subheader("EXPORT MODULE")
+
+    if not st.session_state["analysis_done"]:
+        ui_notice("STATUS", "Run Intake → Analyze first.", tone="warn")
 
     items = st.session_state["items"] or []
     checks = st.session_state["task_checks"] or {}
@@ -1656,19 +1698,16 @@ def page_export():
 
     comp = compliance_score(items)
     overall = overall_progress_score(items, checks, c, drafts)
-
     allowed = export_allowed(overall, comp)
 
     if not drafts:
         ui_notice("STATUS", "Generate drafts before export.", tone="warn")
         return
 
-    # Export lock view (reasons already shown globally; keep action here)
     if not allowed:
-        ui_notice("EXPORT LOCKED", "Resolve compliance and progress until thresholds are met.", tone="warn")
+        ui_notice("EXPORT LOCKED", "Raise Compliance to 80%+ and Overall to 60%+ to unlock export.", tone="warn")
         return
 
-    # Build and export
     doc_bytes = build_docx_package(
         company=c,
         logo_bytes=st.session_state["logo_bytes"],
@@ -1695,6 +1734,7 @@ def page_export():
         mime="text/csv",
         use_container_width=True
     )
+
 
 # ============================================================
 # Render current step
