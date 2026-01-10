@@ -1,3 +1,4 @@
+# ui/pages/dashboard.py
 from __future__ import annotations
 
 import streamlit as st
@@ -7,65 +8,103 @@ from ui.components import render_readiness_console, ui_notice
 
 
 def page_dashboard():
+    """
+    Dashboard = Readiness Console + Diagnostics + Critical Submission Info + Warnings + Quick Actions
+    Assumes these session keys may exist:
+      - rfp_text, rfp_filename, rfp_pages, rfp_meta (dict)
+      - company (dict)
+      - draft (dict) and/or drafts (dict)
+    """
+
     ss = st.session_state
 
+    # Title area
     st.markdown("## Dashboard")
-    st.caption("Your readiness view. No clutter — only what impacts compliance + win strength.")
+    st.caption("No clutter. Compliance, win strength, progress — plus only critical submission signals.")
 
-    # Require RFP to show real dashboard signal
+    # Hard requirement: need an RFP for meaningful dashboard
     if not (ss.get("rfp_text") or "").strip():
-        ui_notice("UPLOAD REQUIRED", "Start by uploading an RFP on the Upload page.", tone="warn")
+        ui_notice("UPLOAD REQUIRED", "Start by uploading an RFP on Upload RFP, then click Analyze.", tone="warn")
         return
 
-    # Live scores
+    # Compute scores + persist for sidebar widgets
     scores = compute_scores(ss)
-
-    # Save for sidebar and console
     ss["scores"] = scores
 
-    # Console
-    render_readiness_console(scores, build_version=ss.get("build_version", "v1"), build_date=ss.get("build_date", ""))
+    # Readiness Console (banner + bars + walker)
+    render_readiness_console(
+        scores=scores,
+        build_version=ss.get("build_version", "v1"),
+        build_date=ss.get("build_date", ""),
+    )
 
-    # Diagnostics block
+    # --- Top: Diagnostics + Critical Submission Info ---
     st.markdown("### RFP Diagnostics")
-    c1, c2, c3 = st.columns(3)
-    with c1:
+    d1, d2, d3 = st.columns(3)
+    with d1:
         st.metric("Filename", ss.get("rfp_filename") or "—")
-    with c2:
-        st.metric("Pages (est.)", ss.get("rfp_pages") or 0)
-    with c3:
+    with d2:
+        st.metric("Pages (est.)", int(ss.get("rfp_pages") or 0))
+    with d3:
         st.metric("Characters", len(ss.get("rfp_text") or ""))
 
-    # Critical meta (placeholder until AI populates)
     meta = ss.get("rfp_meta", {}) or {}
-    st.markdown("### Critical Submission Info")
-    b1, b2 = st.columns(2)
-    with b1:
-        st.write("**Due Date:**", meta.get("due_date") or "—")
-        st.write("**Submission Method:**", meta.get("submission_method") or "—")
-    with b2:
-        st.write("**Submit Email:**", meta.get("submit_email") or "—")
-        st.write("**Solicitation:**", meta.get("solicitation") or "—")
 
-    # Warnings (eligibility / compliance)
+    st.markdown("### Critical Submission Info")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.write("**Due Date:**", meta.get("due_date") or "—")
+        st.write("**Solicitation:**", meta.get("solicitation") or "—")
+    with c2:
+        st.write("**Submit Email:**", meta.get("submit_email") or "—")
+        st.write("**Submission Method:**", meta.get("submission_method") or "—")
+    with c3:
+        st.write("**Agency:**", meta.get("agency") or "—")
+        st.write("**Title:**", meta.get("title") or "—")
+
+    # --- Warnings (eligibility/compliance) ---
     warnings = scores.get("warnings", []) or []
     if warnings:
         st.markdown("### Warnings")
         for w in warnings:
             st.warning(w)
 
-    # Quick actions
+    # --- Progress breakdown cards (quick) ---
+    st.markdown("### Snapshot")
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        st.metric("Compliance", f"{float(scores.get('compliance_pct', 0.0)):.0f}%")
+    with s2:
+        st.metric("Win Strength", f"{float(scores.get('win_strength_pct', 0.0)):.0f}%")
+    with s3:
+        st.metric("Overall Progress", f"{float(scores.get('overall_progress_pct', 0.0)):.0f}%")
+
+    # --- Quick actions ---
     st.markdown("---")
-    a, b, c = st.columns(3)
+    st.markdown("### Quick Actions")
+    a, b, c, d = st.columns(4)
     with a:
-        if st.button("Go to Company Info", use_container_width=True):
-            ss["current_page"] = "Company Info"
+        if st.button("Upload RFP", use_container_width=True):
+            ss["current_page"] = "Upload RFP"
             st.rerun()
     with b:
-        if st.button("Go to Draft Proposal", use_container_width=True):
-            ss["current_page"] = "Draft Proposal"
+        if st.button("Company Info", use_container_width=True):
+            ss["current_page"] = "Company Info"
             st.rerun()
     with c:
-        if st.button("Go to Export", use_container_width=True):
+        if st.button("Draft Proposal", use_container_width=True):
+            ss["current_page"] = "Draft Proposal"
+            st.rerun()
+    with d:
+        if st.button("Export", use_container_width=True):
             ss["current_page"] = "Export"
             st.rerun()
+
+    # --- Optional: show minimal internal state health (dev-friendly, not cluttery) ---
+    with st.expander("System Health (minimal)", expanded=False):
+        company = ss.get("company", {}) or {}
+        draft = ss.get("draft", {}) or {}
+        drafts = ss.get("drafts", {}) or {}
+        st.write("Company fields captured:", len([k for k, v in company.items() if str(v).strip()]))
+        st.write("Draft keys present:", sorted(list(draft.keys()))[:20])
+        st.write("Draft sections present:", sorted(list(drafts.keys()))[:20])
