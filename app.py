@@ -1,55 +1,71 @@
 import streamlit as st
 
-from ui.components import inject_css, sidebar_nav
+from core.state import init_state
 from ui.pages.home import page_home
-from ui.pages.company import page_company
+from ui.pages.company_info import page_company_info
 from ui.pages.draft import page_draft
 from ui.pages.export import page_export
+from core.scoring import compute_progress
 
-APP_NAME = "Path.ai"
-BUILD_VERSION = "v1.2.0"
-
+# MUST be first Streamlit command
 st.set_page_config(
-    page_title=f"{APP_NAME} – Federal Proposal Prep",
+    page_title="Path.ai — Federal Proposal Prep",
     page_icon="🧭",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-inject_css()
+APP_NAME = "Path.ai"
+TAGLINE = "You’re on the right path to success."
 
-# ---- Session defaults ----
-if "route" not in st.session_state:
-    st.session_state.route = "Dashboard"
-if "rfp" not in st.session_state:
-    st.session_state.rfp = {"text": "", "pages": 0, "filename": None}
-if "analysis" not in st.session_state:
-    st.session_state.analysis = {
-        "requirements": [],
-        "compat_rows": [],
-        "diagnostics": {"due_date": "", "submit_email": "", "notes": ""},
-        "scores": {"compliance": 0, "company": 0, "win": 0, "overall": 0},
-        "suggestions": [],
-        "eligibility": {"ok": True, "warnings": []},
-    }
-if "company" not in st.session_state:
-    st.session_state.company = {}
-if "draft" not in st.session_state:
-    st.session_state.draft = {"cover": "", "narrative": "", "outline": ""}
+init_state()
 
-# ---- Sidebar ----
-sidebar_nav(APP_NAME, BUILD_VERSION)
+# --- Sidebar: TurboTax-style progress (no “Fixes” page) ---
+progress = compute_progress(st.session_state)
 
-# ---- Route ----
-route = st.session_state.route
-if route == "Dashboard":
+st.sidebar.markdown(f"## {APP_NAME}")
+st.sidebar.caption(TAGLINE)
+st.sidebar.markdown("---")
+
+def step_color(step_key: str) -> str:
+    # green = complete, orange = started, red = not started
+    s = progress["steps"].get(step_key, {})
+    return s.get("color", "red")
+
+def step_badge(label: str, color: str) -> str:
+    dot = {"green": "🟢", "orange": "🟠", "red": "🔴"}.get(color, "⚪")
+    return f"{dot} {label}"
+
+step_labels = {
+    "home": "Upload RFP",
+    "company": "Company Info",
+    "draft": "Draft Proposal",
+    "export": "Export",
+}
+
+st.sidebar.markdown("### Your Path")
+st.sidebar.write(step_badge(step_labels["home"], step_color("home")))
+st.sidebar.write(step_badge(step_labels["company"], step_color("company")))
+st.sidebar.write(step_badge(step_labels["draft"], step_color("draft")))
+st.sidebar.write(step_badge(step_labels["export"], step_color("export")))
+st.sidebar.markdown("---")
+
+st.sidebar.metric("Compliance", f'{progress["compliance_pct"]:.0f}%')
+st.sidebar.metric("Win Strength", f'{progress["win_strength_pct"]:.0f}%')
+st.sidebar.progress(progress["overall_progress_pct"] / 100.0)
+
+# Navigation
+page = st.sidebar.radio(
+    "Navigate",
+    options=["Upload RFP", "Company Info", "Draft Proposal", "Export"],
+    index=0,
+)
+
+if page == "Upload RFP":
     page_home()
-elif route == "Company Info":
-    page_company()
-elif route == "Draft Proposal":
+elif page == "Company Info":
+    page_company_info()
+elif page == "Draft Proposal":
     page_draft()
-elif route == "Export":
+elif page == "Export":
     page_export()
-else:
-    st.session_state.route = "Dashboard"
-    st.rerun()
