@@ -372,3 +372,23 @@ def path_sidebar(scores: Dict[str, Any]):
 from typing import List
 
 def certification_options() -> List[str]:
+    return [
+        "SDVOSB (Service-Disabled Veteran-Owned Small Business)",
+        "VOSB (Veteran-Owned Small Business)",
+        "8(a)",
+        "HUBZone",
+        "WOSB (Women-Owned Small Business)",
+        "EDWOSB (Economically Disadvantaged WOSB)",
+        "Small Disadvantaged Business (SDB)",
+        "Minority-Owned Business",
+        "Native American-Owned Business",
+        "Alaska Native-Owned Business",
+        "Tribal-Owned Business",
+        "AbilityOne",
+        "ISO 9001",
+        "ISO 27001",
+        "CMMI",
+        "SOC 2",
+        "FedRAMP",
+        "None",
+    ]
