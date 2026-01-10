@@ -1,142 +1,85 @@
 import streamlit as st
+
 from core.rfp import extract_rfp_text
-from core.analyze import analyze_rfp
-from ui.components import walker_bar, compute_scores
 
 
-def _eligibility_check():
+def page_home() -> None:
+    st.markdown("## You’re on the right path to success.")
+    st.caption("Upload an RFP/RFI PDF (or paste text), then click Analyze.")
+
     ss = st.session_state
-    company_certs = set((ss.get("company", {}).get("certifications") or []))
-    required = set(ss.get("rfp_meta", {}).get("required_certs") or [])
-    warnings = []
+    ss.setdefault("rfp_text", "")
+    ss.setdefault("rfp_filename", "")
+    ss.setdefault("rfp_pages", 0)
+    ss.setdefault("analyzed", False)
 
-    # If RFP explicitly requires cert(s) and company doesn't have them → not eligible
-    missing = [c for c in required if c not in company_certs and c != "None / Not sure"]
-    eligible = len(missing) == 0
+    st.markdown("### Upload RFP")
 
-    if missing:
-        warnings.append(f"Eligibility warning: RFP appears to require {', '.join(missing)}. Your Company Info does not include it yet.")
+    uploaded = st.file_uploader(
+        "Upload RFP/RFI (PDF recommended)",
+        type=["pdf", "txt"],
+        accept_multiple_files=False,
+        label_visibility="collapsed",
+    )
 
-    # Also check matrix eligibility tags
-    for row in ss.get("matrix", []):
-        tag = row.get("eligibility_tag")
-        if tag and tag not in company_certs:
-            # warning but still allow
-            warnings.append(f"Potential mismatch: requirement '{row['id']}' references {tag}, but Company Info doesn't show it.")
+    pasted = st.text_area(
+        "Or paste RFP text",
+        value="",
+        height=180,
+        placeholder="Paste the RFP/RFI text here if PDF extraction fails.",
+    )
 
-    # Deduplicate warnings
-    dedup = []
-    seen = set()
-    for w in warnings:
-        if w not in seen:
-            dedup.append(w)
-            seen.add(w)
+    col1, col2 = st.columns([1, 1])
 
-    ss["eligibility"] = {"eligible": eligible, "warnings": dedup}
+    with col1:
+        analyze_clicked = st.button("Analyze", use_container_width=True)
 
+    with col2:
+        clear_clicked = st.button("Clear", use_container_width=True)
 
-def page_home(show_results_only: bool = False):
-    ss = st.session_state
+    if clear_clicked:
+        ss["rfp_text"] = ""
+        ss["rfp_filename"] = ""
+        ss["rfp_pages"] = 0
+        ss["analyzed"] = False
+        st.rerun()
 
-    if not show_results_only:
-        st.markdown('<div class="path-card">', unsafe_allow_html=True)
-        st.markdown("### Upload RFP")
-        st.caption("Upload a PDF or paste RFP text. Then click Analyze.")
-
-        up = st.file_uploader("RFP PDF", type=["pdf"])
-        pasted = st.text_area("Or paste RFP text", height=150)
-
-        colA, colB = st.columns([1, 1])
-        with colA:
-            analyze = st.button("Analyze", use_container_width=True)
-        with colB:
-            st.button("Clear", use_container_width=True, on_click=lambda: _clear_all())
-
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        # Load
-        if up is not None:
-            b = up.read()
-text, name = extract_rfp_text(b)
-            ss["rfp_text"] = text
-            ss["rfp_name"] = name
-            ss["rfp_file_bytes"] = b  # used for page count analysis
-
-        if pasted.strip():
+    if analyze_clicked:
+        # Priority: pasted text overrides file extraction
+        if pasted and pasted.strip():
             ss["rfp_text"] = pasted.strip()
-            ss["rfp_name"] = "Pasted RFP"
-            ss["rfp_file_bytes"] = b""  # no pages
-
-        # Analyze
-        if analyze:
-            if not ss.get("rfp_text", "").strip():
-                st.error("Upload or paste an RFP first.")
-                return
-
-            file_bytes = ss.get("rfp_file_bytes", b"")
-            pages, meta, matrix = analyze_rfp(file_bytes, ss.get("rfp_name", ""), ss["rfp_text"])
-            ss["rfp_pages"] = pages
-            ss["rfp_meta"] = meta
-            ss["matrix"] = matrix
+            ss["rfp_filename"] = "Pasted Text"
+            # rough page estimate: ~2,000 chars per page
+            ss["rfp_pages"] = max(1, len(ss["rfp_text"]) // 2000)
             ss["analyzed"] = True
+            st.success("Analyzed pasted text.")
+            st.rerun()
 
-            _eligibility_check()
+        if uploaded is None:
+            st.error("Upload a file or paste text first.")
+            st.stop()
 
-            st.success("Analysis complete. Scroll down for diagnostics, then use the sidebar steps.")
+        data = extract_rfp_text(uploaded)  # expects dict: {text, pages, filename}
+        text = (data.get("text") or "").strip()
 
-    # Results / Dashboard
-    st.divider()
-    st.markdown("## Readiness Console")
+        if not text:
+            st.error("Could not extract text from this file. Try pasting the text instead.")
+            st.stop()
 
-    compliance, company_pct, overall, win = compute_scores()
-    walker_bar("Compliance", compliance)
-    walker_bar("Company Profile", company_pct)
-    walker_bar("Overall Progress", overall)
-    walker_bar("Win Ability", win)
+        ss["rfp_text"] = text
+        ss["rfp_filename"] = data.get("filename") or getattr(uploaded, "name", "Uploaded File")
+        ss["rfp_pages"] = int(data.get("pages") or 0)
+        ss["analyzed"] = True
+        st.success("RFP analyzed.")
+        st.rerun()
 
-    st.divider()
-    st.markdown("## Diagnostics")
+    # Diagnostics / status (shows after analyze)
+    if ss.get("analyzed") and ss.get("rfp_text"):
+        st.markdown("---")
+        st.markdown("### Diagnostics")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("File", ss.get("rfp_filename") or "—")
+        c2.metric("Pages (est.)", ss.get("rfp_pages") or 0)
+        c3.metric("Characters", len(ss.get("rfp_text") or ""))
 
-    meta = ss.get("rfp_meta", {})
-    left, right = st.columns([1, 1])
-
-    with left:
-        st.markdown('<div class="path-card">', unsafe_allow_html=True)
-        st.markdown("### RFP Snapshot")
-        st.write(f"**File:** {ss.get('rfp_name','')}")
-        st.write(f"**Pages:** {ss.get('rfp_pages', 0)}")
-        st.write(f"**Solicitation #:** {meta.get('solicitation_number','')}")
-        st.write(f"**Contract Title:** {meta.get('contract_title','')}")
-        st.write(f"**Agency:** {meta.get('agency','')}")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    with right:
-        st.markdown('<div class="path-card">', unsafe_allow_html=True)
-        st.markdown("### Submission Info")
-        st.write(f"**Due Date:** {meta.get('due_date','')}")
-        st.write(f"**Submit To:** {meta.get('submission_email','')}")
-        st.write(f"**Submission Method:** {meta.get('submission_method','')}")
-        st.write(f"**Set-Aside:** {meta.get('set_aside','')}")
-        st.write(f"**NAICS:** {meta.get('naics','')}")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    elig = ss.get("eligibility", {})
-    if elig and elig.get("warnings"):
-        st.markdown('<div class="path-card path-warning">', unsafe_allow_html=True)
-        st.markdown("### Eligibility / Warnings")
-        for w in elig["warnings"][:6]:
-            st.write(f"- {w}")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    st.divider()
-    st.markdown("## Requirements (Compatibility Matrix Preview)")
-    matrix = ss.get("matrix", [])
-    st.caption("This will become your core “Compatibility Matrix” export + compliance scoring source of truth.")
-    st.dataframe(matrix[:30], use_container_width=True)
-
-
-def _clear_all():
-    # reset only key states
-    for k in ["analyzed", "rfp_text", "rfp_name", "rfp_pages", "rfp_meta", "matrix", "eligibility", "draft", "last_ai_error", "rfp_file_bytes"]:
-        if k in st.session_state:
-            del st.session_state[k]
+        st.info("Next: go to **Company Info** and then **Draft Proposal**.")
