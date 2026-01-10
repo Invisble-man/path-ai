@@ -1,71 +1,134 @@
 import streamlit as st
 
-from core.state import init_state
-from ui.pages.home import page_home
-from ui.pages.company import page_company
-from ui.pages.draft import page_draft
-from ui.pages.export import page_export
-from core.scoring import compute_progress
-
-# MUST be first Streamlit command
-st.set_page_config(
-    page_title="Path.ai — Federal Proposal Prep",
-    page_icon="🧭",
-    layout="wide",
-    initial_sidebar_state="expanded",
+from core.state import (
+    init_app_state,
+    set_current_step,
+    get_step_status_map,
+    step_order,
 )
 
-APP_NAME = "Path.ai"
-TAGLINE = "You’re on the right path to success."
+from ui.pages.home import render as render_home
+from ui.pages.dashboard import render as render_dashboard
+from ui.pages.company import render as render_company
+from ui.pages.draft import render as render_draft
+from ui.pages.compatibility import render as render_compatibility
+from ui.pages.export import render as render_export
 
-init_state()
 
-# --- Sidebar: TurboTax-style progress (no “Fixes” page) ---
-progress = compute_progress(st.session_state)
+APP_TITLE = "Path.AI"
 
-st.sidebar.markdown(f"## {APP_NAME}")
-st.sidebar.caption(TAGLINE)
-st.sidebar.markdown("---")
 
-def step_color(step_key: str) -> str:
-    # green = complete, orange = started, red = not started
-    s = progress["steps"].get(step_key, {})
-    return s.get("color", "red")
+def _inject_global_css() -> None:
+    st.markdown(
+        """
+        <style>
+          /* Slightly rugged/futuristic: dark-friendly but not harsh */
+          .block-container { padding-top: 1.2rem; padding-bottom: 2rem; max-width: 1100px; }
+          h1, h2, h3 { letter-spacing: -0.02em; }
+          .path-badge {
+            display:inline-block;
+            padding: 0.2rem 0.55rem;
+            border-radius: 999px;
+            font-size: 0.82rem;
+            border: 1px solid rgba(255,255,255,0.18);
+            background: rgba(255,255,255,0.06);
+          }
+          .path-muted { opacity: 0.85; }
+          .path-warn {
+            border-left: 4px solid #f59e0b;
+            padding: 0.75rem 0.9rem;
+            background: rgba(245,158,11,0.08);
+            border-radius: 0.4rem;
+          }
+          .path-ok {
+            border-left: 4px solid #22c55e;
+            padding: 0.75rem 0.9rem;
+            background: rgba(34,197,94,0.08);
+            border-radius: 0.4rem;
+          }
+          .path-danger {
+            border-left: 4px solid #ef4444;
+            padding: 0.75rem 0.9rem;
+            background: rgba(239,68,68,0.08);
+            border-radius: 0.4rem;
+          }
+          /* Make sidebar feel like a guide, not dev UI */
+          section[data-testid="stSidebar"] { border-right: 1px solid rgba(255,255,255,0.10); }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
-def step_badge(label: str, color: str) -> str:
-    dot = {"green": "🟢", "orange": "🟠", "red": "🔴"}.get(color, "⚪")
-    return f"{dot} {label}"
 
-step_labels = {
-    "home": "Upload RFP",
-    "company": "Company Info",
-    "draft": "Draft Proposal",
-    "export": "Export",
-}
+def _sidebar_nav() -> None:
+    st.sidebar.markdown(f"## {APP_TITLE}")
+    st.sidebar.markdown(
+        "<div class='path-muted'>TurboTax-style guidance for federal proposals.</div>",
+        unsafe_allow_html=True,
+    )
+    st.sidebar.markdown("---")
 
-st.sidebar.markdown("### Your Path")
-st.sidebar.write(step_badge(step_labels["home"], step_color("home")))
-st.sidebar.write(step_badge(step_labels["company"], step_color("company")))
-st.sidebar.write(step_badge(step_labels["draft"], step_color("draft")))
-st.sidebar.write(step_badge(step_labels["export"], step_color("export")))
-st.sidebar.markdown("---")
+    status_map = get_step_status_map()
 
-st.sidebar.metric("Compliance", f'{progress["compliance_pct"]:.0f}%')
-st.sidebar.metric("Win Strength", f'{progress["win_strength_pct"]:.0f}%')
-st.sidebar.progress(progress["overall_progress_pct"] / 100.0)
+    # Color key:
+    # ✅ done, 🟧 in-progress, ⬜ not started
+    labels = {
+        "done": "✅",
+        "in_progress": "🟧",
+        "not_started": "⬜",
+    }
 
-# Navigation
-page = st.sidebar.radio(
-    "Navigate",
-    options=["Upload RFP", "Company Info", "Draft Proposal", "Export"],
-    index=0,
-)
+    for step_id, step_label in step_order:
+        status = status_map.get(step_id, "not_started")
+        icon = labels.get(status, "⬜")
 
-if page == "Upload RFP":
-    page_home()
-elif page == "Company Info":
-    page_company_info()
-elif page == "Draft Proposal":
-    page_draft()
-elif page == "Export":
-    page_export()
+        # We allow navigating anywhere EXCEPT Draft is “recommended” gated by progress in later step logic.
+        # Here we always allow clicking; the page itself will warn if prerequisites aren't met.
+        if st.sidebar.button(f"{icon} {step_label}", use_container_width=True):
+            set_current_step(step_id)
+            st.rerun()
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(
+        "<span class='path-badge'>Export is always unlocked</span>",
+        unsafe_allow_html=True,
+    )
+
+
+def _route() -> None:
+    step = st.session_state.get("current_step", "home")
+
+    if step == "home":
+        render_home()
+    elif step == "dashboard":
+        render_dashboard()
+    elif step == "company":
+        render_company()
+    elif step == "draft":
+        render_draft()
+    elif step == "compatibility":
+        render_compatibility()
+    elif step == "export":
+        render_export()
+    else:
+        # Safety fallback
+        set_current_step("home")
+        render_home()
+
+
+def main() -> None:
+    st.set_page_config(
+        page_title=APP_TITLE,
+        page_icon="🧭",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+
+    _inject_global_css()
+    init_app_state()
+    _sidebar_nav()
+    _route()
+
+
+if __name__ == "__main__":
+    main()
