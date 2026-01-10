@@ -2,7 +2,7 @@ import io
 import json
 import re
 import base64
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import List, Dict, Tuple, Optional, Any
 
 import streamlit as st
@@ -10,101 +10,221 @@ from pypdf import PdfReader
 import docx  # python-docx
 import requests
 
-from docx.shared import Inches, RGBColor
+from docx.shared import Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 # ============================================================
-# Path.ai — Federal Proposal Prep
-# Guided flow + AI gating + DOCX export
+# Path.ai — Federal Proposal Prep (Rigid Futuristic v2)
+# Relevance-only UI • Readiness Console • Export gating
 # ============================================================
 
 APP_NAME = "Path.ai"
-BUILD_VERSION = "v1.0.1"
-BUILD_DATE = "Jan 9, 2026"
+BUILD_VERSION = "v1.1.0"
+BUILD_DATE = "Jan 10, 2026"
 
 st.set_page_config(page_title=f"{APP_NAME} – Proposal Prep", layout="wide")
 
-
 # ============================================================
-# Styling
+# Styling (Rigid Futuristic)
 # ============================================================
 def inject_css():
     st.markdown(
         """
         <style>
-        .block-container { padding-top: 1.0rem; padding-bottom: 2.5rem; max-width: 1200px; }
-        header[data-testid="stHeader"] { background: rgba(255,255,255,0.85); backdrop-filter: blur(6px); }
-
-        .brandbar {
-            display:flex; align-items:center; justify-content:space-between;
-            padding: 14px 16px; border-radius: 16px;
-            border: 1px solid rgba(49,51,63,0.14);
-            background: linear-gradient(135deg, rgba(92, 124, 250, 0.10), rgba(34, 197, 94, 0.08));
-            margin-bottom: 12px;
+        :root{
+          --bg: rgba(255,255,255,0.92);
+          --bd: rgba(49,51,63,0.14);
+          --tx: rgba(49,51,63,0.92);
+          --mut: rgba(49,51,63,0.66);
+          --good: rgba(34,197,94,0.18);
+          --warn: rgba(234,179,8,0.20);
+          --bad:  rgba(239,68,68,0.18);
+          --neu:  rgba(92,124,250,0.14);
+          --ink: rgba(20, 22, 30, 0.9);
         }
-        .brand-left { display:flex; align-items:center; gap: 10px; }
-        .brand-dot {
-            width: 14px; height: 14px; border-radius: 999px;
-            background: radial-gradient(circle at 30% 30%, #22c55e, #5c7cfa);
-        }
-        .brand-title { font-weight: 800; font-size: 1.05rem; }
-        .brand-sub { color: rgba(49,51,63,0.72); font-size: 0.90rem; margin-top: 2px; }
 
-        .card {
-            border: 1px solid rgba(49,51,63,0.14);
-            border-radius: 16px;
-            padding: 14px 14px 12px 14px;
-            margin-bottom: 12px;
-            background: rgba(255,255,255,0.92);
-        }
-        .card h4 { margin: 0 0 6px 0; font-size: 0.98rem; }
-        .muted { color: rgba(49,51,63,0.65); font-size: 0.90rem; }
-        .divider { height: 1px; background: rgba(49,51,63,0.10); margin: 10px 0; }
+        .block-container { padding-top: 0.75rem; padding-bottom: 2.2rem; max-width: 1180px; }
+        header[data-testid="stHeader"] { background: rgba(255,255,255,0.90); backdrop-filter: blur(8px); }
 
-        .pill {
-            display: inline-block;
-            padding: 7px 11px;
-            border-radius: 999px;
-            font-size: 0.86rem;
-            font-weight: 700;
-            border: 1px solid rgba(49,51,63,0.14);
-            margin-right: 8px;
-            margin-bottom: 8px;
+        /* Top System Banner */
+        .sysbar{
+          display:flex; align-items:center; justify-content:space-between;
+          border: 1px solid var(--bd);
+          border-radius: 14px;
+          padding: 12px 14px;
+          background: linear-gradient(135deg, rgba(92,124,250,0.10), rgba(20,22,30,0.04));
+          margin-bottom: 12px;
         }
-        .pill-green { background: rgba(34, 197, 94, 0.13); }
-        .pill-yellow { background: rgba(234, 179, 8, 0.16); }
-        .pill-red { background: rgba(239, 68, 68, 0.14); }
-        .pill-blue { background: rgba(92, 124, 250, 0.12); }
-
-        .notice {
-            border-radius: 16px;
-            padding: 12px 14px;
-            border: 1px solid rgba(49,51,63,0.14);
-            background: rgba(255,255,255,0.92);
-            margin: 10px 0 12px 0;
+        .sys-left{display:flex; gap:12px; align-items:flex-start;}
+        .sys-dot{
+          width: 10px; height: 10px; border-radius: 999px;
+          background: radial-gradient(circle at 30% 30%, #22c55e, #5c7cfa);
+          margin-top: 6px;
         }
-        .notice-title { font-weight: 800; margin: 0 0 4px 0; font-size: 0.96rem; }
-        .notice-body { margin: 0; font-size: 0.93rem; color: rgba(49,51,63,0.86); }
-        .tone-good { background: rgba(34,197,94,0.10); }
-        .tone-warn { background: rgba(234,179,8,0.12); }
-        .tone-bad  { background: rgba(239,68,68,0.12); }
-        .tone-neutral { background: rgba(92,124,250,0.08); }
+        .sys-title{
+          font-weight: 900;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          font-size: 0.84rem;
+          color: rgba(20,22,30,0.88);
+        }
+        .sys-quote{
+          font-weight: 900;
+          letter-spacing: 0.02em;
+          font-size: 1.05rem;
+          color: rgba(20,22,30,0.92);
+          margin-top: 2px;
+        }
+        .sys-sub{
+          font-size: 0.90rem;
+          color: var(--mut);
+          margin-top: 2px;
+        }
 
+        /* Console Card */
+        .console{
+          border: 1px solid var(--bd);
+          border-radius: 16px;
+          padding: 14px 14px 12px 14px;
+          background: var(--bg);
+          margin-bottom: 12px;
+        }
+        .console h4{
+          margin: 0;
+          font-size: 0.92rem;
+          font-weight: 900;
+          letter-spacing: 0.06em;
+          text-transform: uppercase;
+          color: rgba(20,22,30,0.86);
+        }
+        .console-sub{
+          margin-top: 4px;
+          color: var(--mut);
+          font-size: 0.90rem;
+        }
+        .divider{ height: 1px; background: rgba(49,51,63,0.10); margin: 10px 0; }
+
+        /* Bars */
+        .barrow{ display:flex; align-items:center; justify-content:space-between; gap: 10px; margin: 10px 0 6px 0; }
+        .barlabel{
+          font-weight: 900;
+          letter-spacing: 0.05em;
+          text-transform: uppercase;
+          font-size: 0.78rem;
+          color: rgba(20,22,30,0.86);
+          white-space: nowrap;
+        }
+        .barmeta{
+          font-size: 0.84rem;
+          color: var(--mut);
+          white-space: nowrap;
+        }
+        .barwrap{
+          position: relative;
+          height: 12px;
+          border-radius: 999px;
+          border: 1px solid rgba(49,51,63,0.18);
+          background: rgba(20,22,30,0.04);
+          overflow: hidden;
+        }
+        .barfill{
+          height: 100%;
+          border-radius: 999px;
+        }
+
+        /* Path Walker */
+        .walker{
+          position:absolute;
+          top: -14px; /* floats above bar */
+          width: 24px;
+          height: 24px;
+          transform: translateX(-50%);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+        }
+        .walker svg{ width: 22px; height: 22px; }
+
+        /* Status chips */
+        .chip{
+          display:inline-block;
+          border: 1px solid rgba(49,51,63,0.18);
+          border-radius: 999px;
+          padding: 6px 10px;
+          font-size: 0.82rem;
+          font-weight: 900;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
+          margin-right: 8px;
+          margin-top: 6px;
+          color: rgba(20,22,30,0.86);
+          background: rgba(255,255,255,0.9);
+        }
+        .chip-good{ background: var(--good); }
+        .chip-warn{ background: var(--warn); }
+        .chip-bad{  background: var(--bad);  }
+        .chip-neu{  background: var(--neu);  }
+
+        /* Notices */
+        .notice{
+          border-radius: 14px;
+          padding: 11px 12px;
+          border: 1px solid var(--bd);
+          background: var(--bg);
+          margin: 10px 0 12px 0;
+        }
+        .notice-title{ font-weight: 900; letter-spacing:0.04em; text-transform:uppercase; margin: 0 0 4px 0; font-size: 0.80rem; color: rgba(20,22,30,0.86); }
+        .notice-body{ margin: 0; font-size: 0.93rem; color: rgba(20,22,30,0.80); }
+
+        .tone-good { background: var(--good); }
+        .tone-warn { background: var(--warn); }
+        .tone-bad  { background: var(--bad); }
+        .tone-neutral { background: var(--neu); }
+
+        /* Buttons */
         .stButton>button {
-            border-radius: 14px !important;
-            padding: 0.70rem 0.95rem !important;
-            font-weight: 800 !important;
+          border-radius: 12px !important;
+          padding: 0.68rem 0.95rem !important;
+          font-weight: 900 !important;
+          letter-spacing: 0.02em !important;
         }
 
-        div[data-testid="stExpander"] details summary p { font-size: 0.96rem; font-weight: 700; }
-        div[data-testid="stCheckbox"] label p { font-size: 0.95rem; }
+        /* Expanders */
+        div[data-testid="stExpander"] details summary p { font-size: 0.92rem; font-weight: 900; letter-spacing:0.02em; }
+
+        /* Task cards */
+        .taskcard{
+          border: 1px solid rgba(49,51,63,0.14);
+          border-radius: 14px;
+          padding: 12px 12px 10px 12px;
+          background: rgba(255,255,255,0.94);
+          margin-bottom: 10px;
+        }
+        .tasktitle{
+          font-weight: 900;
+          color: rgba(20,22,30,0.90);
+          font-size: 0.95rem;
+          margin: 0;
+        }
+        .taskmeta{
+          margin-top: 4px;
+          color: var(--mut);
+          font-size: 0.86rem;
+        }
+        .taskimpact{
+          margin-top: 6px;
+          font-size: 0.82rem;
+          font-weight: 900;
+          letter-spacing: 0.04em;
+          text-transform: uppercase;
+          color: rgba(20,22,30,0.78);
+        }
         </style>
         """,
         unsafe_allow_html=True
     )
-
 
 def ui_notice(title: str, body: str, tone: str = "neutral"):
     tone_class = {
@@ -124,7 +244,6 @@ def ui_notice(title: str, body: str, tone: str = "neutral"):
         unsafe_allow_html=True
     )
 
-
 inject_css()
 
 # ============================================================
@@ -132,6 +251,7 @@ inject_css()
 # ============================================================
 GATING_LABELS = ["ACTIONABLE", "INFORMATIONAL", "IRRELEVANT", "AUTO_RESOLVED"]
 
+DEFAULT_SECTIONS = ["Cover Letter", "Executive Summary", "Technical Approach", "Management Plan", "Past Performance", "Compliance Snapshot"]
 
 @dataclass
 class ProposalItem:
@@ -142,17 +262,19 @@ class ProposalItem:
     bucket: str
     gating_label: str
     confidence: float
-    status: str = "Unknown"
+    status: str = "Unknown"          # for requirement items only
     notes: str = ""
     mapped_section: str = ""
-
+    display_title: str = ""          # cleaned, user-facing
+    display_detail: str = ""         # concise detail (optional)
+    priority: str = "NORMAL"         # CRITICAL/HIGH/NORMAL/OPTIONAL
+    impact: str = "SCORE"            # COMPLIANCE/SCORE/READINESS
 
 # ============================================================
 # Helpers
 # ============================================================
 def normalize_line(line: str) -> str:
     return re.sub(r"\s+", " ", (line or "")).strip()
-
 
 def scan_lines(text: str, max_lines: int = 12000) -> List[str]:
     out = []
@@ -164,7 +286,6 @@ def scan_lines(text: str, max_lines: int = 12000) -> List[str]:
             break
     return out
 
-
 def unique_keep_order(items: List[str]) -> List[str]:
     seen = set()
     out = []
@@ -175,13 +296,32 @@ def unique_keep_order(items: List[str]) -> List[str]:
             out.append(x)
     return out
 
+def clamp_pct(x: float) -> int:
+    return int(max(0, min(100, round(x))))
 
-def score_to_confidence(score: int, max_score: int = 10) -> float:
-    if max_score <= 0:
-        return 0.0
-    v = max(0, min(max_score, score))
-    return round(v / max_score, 2)
+def pct_color(p: int) -> Tuple[str, str]:
+    """
+    Returns (hex-ish css color name, chip class)
+    """
+    if p < 50:
+        return "#ef4444", "chip-bad"
+    if p < 70:
+        return "#f59e0b", "chip-warn"
+    if p < 80:
+        return "#eab308", "chip-warn"
+    return "#22c55e", "chip-good"
 
+def grade_from_pct(p: int) -> str:
+    if p >= 90: return "A"
+    if p >= 80: return "B"
+    if p >= 70: return "C"
+    if p >= 60: return "D"
+    return "F"
+
+def safe_no_insert(text: str) -> bool:
+    t = (text or "").lower()
+    banned = ["insert ", "tbd", "[", "]", "lorem ipsum", "fill in", "placeholder"]
+    return not any(b in t for b in banned)
 
 # ============================================================
 # Text extraction
@@ -209,11 +349,9 @@ def extract_text_from_pdf(file_bytes: bytes) -> Tuple[str, Dict[str, Any]]:
 
     return out, diag
 
-
 def extract_text_from_docx(file_bytes: bytes) -> str:
     document = docx.Document(io.BytesIO(file_bytes))
     return "\n".join([p.text for p in document.paragraphs if p.text]).strip()
-
 
 def read_uploaded_file(uploaded_file) -> Tuple[str, Dict[str, Any]]:
     if not uploaded_file:
@@ -238,9 +376,8 @@ def read_uploaded_file(uploaded_file) -> Tuple[str, Dict[str, Any]]:
     diag = {"file_type": "text", "pages_total": None, "pages_with_text": None, "chars_extracted": len(text), "likely_scanned": False}
     return text, diag
 
-
 # ============================================================
-# Detection heuristics
+# Detection heuristics (minimal, relevance-first)
 # ============================================================
 FORM_PATTERNS = [
     (r"\bSF[-\s]?1449\b", "SF 1449 (Commercial Items)"),
@@ -248,12 +385,6 @@ FORM_PATTERNS = [
     (r"\bSF[-\s]?30\b", "SF 30 (Amendment/Modification)"),
     (r"\bSF[-\s]?18\b", "SF 18 (RFQ)"),
     (r"\bDD[-\s]?1155\b", "DD 1155 (Order for Supplies or Services)"),
-]
-
-ATTACHMENT_KEYWORDS = [
-    "attachment", "appendix", "exhibit", "annex", "enclosure", "addendum",
-    "amendment", "modification", "pricing", "price schedule", "rate sheet",
-    "spreadsheet", "xlsx", "excel",
 ]
 
 SUBMISSION_RULE_PATTERNS = [
@@ -270,8 +401,11 @@ AMENDMENT_PATTERN = r"\bamendment\b|\bamendments\b|\ba0{2,}\d+\b|\bmodification\
 REQ_TRIGGER = re.compile(r"\b(shall|must|will)\b", re.IGNORECASE)
 REQ_NUMBERED = re.compile(r"^(\(?[a-z0-9]{1,4}\)?[\.\)]|\d{1,3}\.)\s+", re.IGNORECASE)
 
-DEFAULT_SECTIONS = ["Cover Letter", "Executive Summary", "Technical Approach", "Management Plan", "Past Performance", "Compliance Snapshot"]
-
+ATTACHMENT_KEYWORDS = [
+    "attachment", "appendix", "exhibit", "annex", "enclosure", "addendum",
+    "amendment", "modification", "pricing", "price schedule", "rate sheet",
+    "spreadsheet", "xlsx", "excel",
+]
 
 def find_forms(text: str) -> List[str]:
     found = []
@@ -279,18 +413,6 @@ def find_forms(text: str) -> List[str]:
         if re.search(pat, text or "", re.IGNORECASE):
             found.append(label)
     return unique_keep_order(found)
-
-
-def find_attachment_lines(text: str) -> List[str]:
-    lines = scan_lines(text)
-    hits = []
-    for line in lines:
-        low = line.lower()
-        if any(k in low for k in ATTACHMENT_KEYWORDS):
-            if len(line) <= 320:
-                hits.append(line)
-    return unique_keep_order(hits)
-
 
 def detect_submission_rules(text: str) -> Dict[str, List[str]]:
     lines = scan_lines(text)
@@ -300,15 +422,23 @@ def detect_submission_rules(text: str) -> Dict[str, List[str]]:
             if re.search(pat, line, re.IGNORECASE):
                 grouped.setdefault(label, []).append(line)
     for k in list(grouped.keys()):
-        grouped[k] = unique_keep_order(grouped[k])[:12]
+        grouped[k] = unique_keep_order(grouped[k])[:10]
     return grouped
 
+def find_attachment_lines(text: str) -> List[str]:
+    lines = scan_lines(text)
+    hits = []
+    for line in lines:
+        low = line.lower()
+        if any(k in low for k in ATTACHMENT_KEYWORDS):
+            if len(line) <= 260:
+                hits.append(line)
+    return unique_keep_order(hits)
 
 def detect_amendment_lines(text: str) -> List[str]:
     lines = scan_lines(text)
     hits = [l for l in lines if re.search(AMENDMENT_PATTERN, l, re.IGNORECASE)]
-    return unique_keep_order(hits)
-
+    return unique_keep_order(hits)[:20]
 
 def extract_requirements_best_effort(rfp_text: str, max_reqs: int = 70) -> List[str]:
     lines = scan_lines(rfp_text, max_lines=12000)
@@ -330,7 +460,6 @@ def extract_requirements_best_effort(rfp_text: str, max_reqs: int = 70) -> List[
                 break
     return reqs
 
-
 def auto_map_section(req_text: str) -> str:
     t = (req_text or "").lower()
     if "past performance" in t or "cpars" in t:
@@ -344,7 +473,6 @@ def auto_map_section(req_text: str) -> str:
     if "cover letter" in t or "signed" in t or "signature" in t:
         return "Cover Letter"
     return "Technical Approach"
-
 
 # ============================================================
 # Company info
@@ -361,7 +489,7 @@ class CompanyInfo:
     poc_email: str = ""
     poc_phone: str = ""
     website: str = ""
-    certifications: List[str] = None
+    certifications: List[str] = field(default_factory=list)
     capabilities: str = ""
     differentiators: str = ""
     past_performance: str = ""
@@ -378,42 +506,34 @@ class CompanyInfo:
 
     def to_dict(self):
         d = asdict(self)
-        if d["certifications"] is None:
+        if d.get("certifications") is None:
             d["certifications"] = []
         return d
 
+CRITICAL_FIELDS = ["legal_name", "uei", "poc_name", "poc_email", "proposal_title", "solicitation_number", "agency_customer"]
+RECOMMENDED_FIELDS = ["address", "poc_phone", "capabilities", "differentiators"]
 
-def missing_info_alerts(company: CompanyInfo) -> Tuple[List[str], List[str]]:
-    critical = []
-    recommended = []
+def company_completeness(company: CompanyInfo) -> int:
+    c = company
+    crit_total = len(CRITICAL_FIELDS)
+    rec_total = len(RECOMMENDED_FIELDS)
 
-    if not company.legal_name.strip():
-        critical.append("Company legal name is missing.")
-    if not company.uei.strip():
-        critical.append("UEI is missing.")
-    if not company.poc_name.strip():
-        critical.append("Point of contact name is missing.")
-    if not company.poc_email.strip():
-        critical.append("Point of contact email is missing.")
+    crit_done = sum(1 for f in CRITICAL_FIELDS if getattr(c, f, "").strip())
+    rec_done = sum(1 for f in RECOMMENDED_FIELDS if getattr(c, f, "").strip())
 
-    if not company.address.strip():
-        recommended.append("Business address is missing.")
-    if not company.capabilities.strip():
-        recommended.append("Capabilities section is empty.")
-    if not company.differentiators.strip():
-        recommended.append("Differentiators section is empty.")
-    if not company.proposal_title.strip():
-        recommended.append("Proposal/Contract title is blank.")
-    if not company.solicitation_number.strip():
-        recommended.append("Solicitation number is blank.")
-    if not company.agency_customer.strip():
-        recommended.append("Agency/Customer is blank.")
+    # Critical is dominant
+    pct = (crit_done / max(1, crit_total)) * 80 + (rec_done / max(1, rec_total)) * 20
+    return clamp_pct(pct)
 
-    return critical, recommended
-
+def missing_critical(company: CompanyInfo) -> List[str]:
+    miss = []
+    for f in CRITICAL_FIELDS:
+        if not getattr(company, f, "").strip():
+            miss.append(f)
+    return miss
 
 # ============================================================
-# AI (OpenAI)
+# AI (OpenAI) — minimal, reliable
 # ============================================================
 def get_openai_key() -> Optional[str]:
     try:
@@ -424,41 +544,82 @@ def get_openai_key() -> Optional[str]:
     import os
     return os.environ.get("OPENAI_API_KEY")
 
+def extract_json_object(s: str) -> Optional[dict]:
+    if not s:
+        return None
+    s = s.strip()
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+    start = s.find("{")
+    end = s.rfind("}")
+    if start >= 0 and end > start:
+        candidate = s[start : end + 1]
+        try:
+            obj = json.loads(candidate)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            return None
+    return None
 
-def openai_chat(messages: List[Dict[str, str]], model: str = "gpt-4.1-mini", temperature: float = 0.2, max_tokens: int = 450) -> Optional[str]:
+def openai_response_json(system: str, user: str, model: str, timeout: int = 30, max_output_tokens: int = 900, temperature: float = 0.1) -> Optional[dict]:
     api_key = get_openai_key()
     if not api_key:
         return None
 
-    url = "https://api.openai.com/v1/chat/completions"
+    url = "https://api.openai.com/v1/responses"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
+    payload = {
+        "model": model,
+        "input": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "max_output_tokens": max_output_tokens,
+        "temperature": temperature,
+    }
+
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=25)
+        r = requests.post(url, headers=headers, json=payload, timeout=timeout)
         if r.status_code >= 300:
+            try:
+                st.sidebar.error(f"OpenAI error {r.status_code}")
+            except Exception:
+                pass
             return None
+
         data = r.json()
-        return (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        text_parts = []
+        for item in data.get("output", []) or []:
+            for c in item.get("content", []) or []:
+                if c.get("type") == "output_text" and c.get("text"):
+                    text_parts.append(c["text"])
+
+        raw = "\n".join(text_parts).strip()
+        return extract_json_object(raw)
     except Exception:
         return None
-
 
 def heuristic_gate_item(text: str, kind: str) -> Tuple[str, float, str]:
     low = (text or "").lower()
 
     bucket = "Other"
     if kind == "rule":
-        bucket = "Submission & Format"
+        bucket = "Submission"
     elif kind == "form":
-        bucket = "Required Forms"
+        bucket = "Forms"
     elif kind == "attachment":
-        bucket = "Attachments/Exhibits"
+        bucket = "Attachments"
     elif kind == "amendment":
         bucket = "Amendments"
     elif kind == "requirement":
-        bucket = "Compliance Requirements"
+        bucket = "Compliance"
     elif kind == "field_missing":
-        bucket = "Company Profile"
+        bucket = "Company"
 
     actionable_hits = 0
     if any(k in low for k in ["due date", "deadline", "no later than", "offers are due", "proposal is due"]):
@@ -472,17 +633,16 @@ def heuristic_gate_item(text: str, kind: str) -> Tuple[str, float, str]:
     if kind == "requirement" and any(k in low for k in ["shall", "must", "will"]):
         actionable_hits += 2
 
-    if len(text) < 20:
+    if len(text) < 18:
         return "IRRELEVANT", 0.70, bucket
 
     if actionable_hits >= 4:
-        return "ACTIONABLE", score_to_confidence(min(10, actionable_hits), 10), bucket
+        return "ACTIONABLE", min(1.0, round(actionable_hits / 10, 2)), bucket
 
-    if kind in ["form", "attachment", "amendment", "field_missing", "requirement"]:
-        return "ACTIONABLE", 0.68, bucket
+    if kind in ["form", "attachment", "amendment", "field_missing", "requirement", "rule"]:
+        return "ACTIONABLE", 0.66, bucket
 
     return "INFORMATIONAL", 0.60, bucket
-
 
 def ai_gate_item(text: str, kind: str, context_hint: str = "") -> Tuple[str, float, str]:
     h_label, h_conf, h_bucket = heuristic_gate_item(text, kind)
@@ -491,53 +651,66 @@ def ai_gate_item(text: str, kind: str, context_hint: str = "") -> Tuple[str, flo
         return h_label, h_conf, h_bucket
 
     prompt = f"""
-Classify proposal item into one gating label:
-ACTIONABLE, INFORMATIONAL, IRRELEVANT, AUTO_RESOLVED
-Also return confidence 0.00–1.00 and bucket:
-Submission & Format, Required Forms, Attachments/Exhibits, Amendments,
-Compliance Requirements, Company Profile, Other
-Return ONLY JSON: {{ "gating_label": "...", "confidence": 0.0, "bucket": "..." }}
+Classify the item for proposal fix workflow.
+
+Return ONLY JSON:
+{{
+  "gating_label": "ACTIONABLE|INFORMATIONAL|IRRELEVANT|AUTO_RESOLVED",
+  "confidence": 0.0,
+  "bucket": "Submission|Forms|Attachments|Amendments|Compliance|Company|Other"
+}}
 
 kind: {kind}
 context: {context_hint}
 text: {text}
 """.strip()
 
-    out = openai_chat(
-        [{"role": "system", "content": "Return only JSON."}, {"role": "user", "content": prompt}],
+    j = openai_response_json(
+        system="Return only JSON.",
+        user=prompt,
         model=st.session_state.get("ai_model", "gpt-4.1-mini"),
-        temperature=0.1,
-        max_tokens=220
+        max_output_tokens=220,
+        temperature=0.1
     )
-    if not out:
+    if not j:
         return h_label, h_conf, h_bucket
 
+    gl = (j.get("gating_label") or "").strip().upper()
     try:
-        j = json.loads(out)
-        gl = (j.get("gating_label") or "").strip().upper()
         cf = float(j.get("confidence", h_conf))
-        bk = (j.get("bucket") or h_bucket).strip()
-        if gl not in GATING_LABELS:
-            return h_label, h_conf, h_bucket
-        cf = max(0.0, min(1.0, cf))
-        return gl, cf, (bk or h_bucket)
     except Exception:
-        return h_label, h_conf, h_bucket
+        cf = h_conf
+    bk = (j.get("bucket") or h_bucket).strip()
 
+    if gl not in GATING_LABELS:
+        return h_label, h_conf, h_bucket
+    cf = max(0.0, min(1.0, cf))
+    return gl, cf, (bk or h_bucket)
 
 def ai_write_drafts(company: CompanyInfo, rfp_text: str) -> Optional[Dict[str, str]]:
     if not st.session_state.get("ai_enabled", False):
         return None
 
-    company_block = json.dumps(company.to_dict(), indent=2)[:2500]
-    rfp_excerpt = (rfp_text or "")[:6000]
+    company_block = json.dumps(company.to_dict(), indent=2)[:2600]
+    rfp_excerpt = (rfp_text or "")[:6500]
 
     prompt = f"""
-Write a concise, professional federal proposal draft with these sections:
-Executive Summary, Technical Approach, Management Plan, Past Performance.
-Do NOT invent certifications or past performance.
+Write a complete, submission-ready federal proposal draft with these sections:
+- Cover Letter
+- Executive Summary
+- Technical Approach
+- Management Plan
+- Past Performance
 
-Return ONLY JSON with those keys.
+Rules:
+- Use ONLY company facts provided. Never invent certifications, clients, contract history, years of experience, staff counts, clearances, or locations.
+- Use the RFP/SOW language to mirror requirements and evaluation intent.
+- Fill gaps using context and safe general statements (delivery method, quality, risk control) without fabricating facts.
+- Do NOT use placeholders like "insert", "TBD", brackets, or "fill in".
+- Keep tone controlled, precise, evaluator-focused.
+
+Return ONLY JSON with keys exactly:
+"Cover Letter", "Executive Summary", "Technical Approach", "Management Plan", "Past Performance"
 
 Company JSON:
 {company_block}
@@ -546,26 +719,105 @@ RFP excerpt:
 {rfp_excerpt}
 """.strip()
 
-    out = openai_chat(
-        [{"role": "system", "content": "Return only JSON."}, {"role": "user", "content": prompt}],
+    j = openai_response_json(
+        system="Return only JSON.",
+        user=prompt,
         model=st.session_state.get("ai_model", "gpt-4.1-mini"),
-        temperature=0.25,
-        max_tokens=1200
+        max_output_tokens=1400,
+        temperature=0.25
     )
-    if not out:
+    if not j or not isinstance(j, dict):
         return None
 
-    try:
-        j = json.loads(out)
-        if not isinstance(j, dict):
+    keys = ["Cover Letter", "Executive Summary", "Technical Approach", "Management Plan", "Past Performance"]
+    if not all(k in j for k in keys):
+        return None
+
+    out = {k: str(j[k]).strip() for k in keys}
+    # Enforce no placeholder language in final drafts
+    for k, v in out.items():
+        if not v or not safe_no_insert(v):
             return None
-        for k in ["Executive Summary", "Technical Approach", "Management Plan", "Past Performance"]:
-            if k not in j:
-                return None
-        return {k: str(j[k]).strip() for k in ["Executive Summary", "Technical Approach", "Management Plan", "Past Performance"]}
-    except Exception:
-        return None
+    return out
 
+# ============================================================
+# Relevance-only task cleaning
+# ============================================================
+def task_rewrite_basic(kind: str, raw: str) -> Tuple[str, str]:
+    t = normalize_line(raw)
+    low = t.lower()
+
+    # Remove obvious raw prefixes
+    t = re.sub(r"^(Page Limit|Font Requirement|Margin Requirement|Due Date/Deadline|Submission Method|File Format Rules|Sections L/M referenced)\s*:\s*", "", t, flags=re.IGNORECASE)
+
+    # Titles
+    if kind == "rule":
+        if "page" in low and "limit" in low:
+            return ("Confirm page limit compliance", t[:220])
+        if "font" in low or "point" in low:
+            return ("Apply required font and size", t[:220])
+        if "margin" in low or "inch" in low:
+            return ("Apply required margins", t[:220])
+        if "deadline" in low or "due" in low or "no later than" in low:
+            return ("Verify submission deadline", t[:220])
+        if any(k in low for k in ["portal", "upload", "email", "submit", "sam.gov", "ebuy", "piee", "fedconnect"]):
+            return ("Confirm submission method", t[:220])
+        if any(k in low for k in ["pdf", "docx", "xlsx", "zip", "encrypt", "password", "file format"]):
+            return ("Confirm file format requirements", t[:220])
+        if "section l" in low or "section m" in low:
+            return ("Review Sections L/M requirements", t[:220])
+        return ("Confirm submission rule", t[:220])
+
+    if kind == "form":
+        return ("Include required government forms", t[:220])
+
+    if kind == "attachment":
+        return ("Confirm required attachments", t[:220])
+
+    if kind == "amendment":
+        return ("Review amendments and incorporate changes", t[:220])
+
+    if kind == "field_missing":
+        # raw is already readable
+        return ("Complete required company profile fields", t[:220])
+
+    if kind == "requirement":
+        # Convert long requirement to concise action
+        if "shall" in low or "must" in low or "will" in low:
+            # Keep first clause
+            short = t
+            short = re.sub(r"\s{2,}", " ", short)
+            if len(short) > 220:
+                short = short[:217] + "..."
+            return ("Address a mandatory requirement", short)
+        short = t[:220]
+        return ("Address a requirement", short)
+
+    return ("Action required", t[:220])
+
+def classify_priority_impact(kind: str, raw: str) -> Tuple[str, str]:
+    low = (raw or "").lower()
+    # impact
+    if kind in ["requirement", "rule", "form", "amendment"]:
+        impact = "COMPLIANCE"
+    elif kind == "field_missing":
+        impact = "READINESS"
+    else:
+        impact = "SCORE"
+
+    # priority
+    priority = "NORMAL"
+    if any(k in low for k in ["due date", "deadline", "no later than", "offers are due", "proposal is due"]):
+        priority = "CRITICAL"
+    if kind == "field_missing":
+        priority = "HIGH"
+    if kind in ["form", "amendment"]:
+        priority = "HIGH"
+    if kind == "requirement" and any(k in low for k in ["shall", "must"]):
+        priority = "HIGH"
+    if kind == "rule" and any(k in low for k in ["page limit", "font", "margins", "file format"]):
+        priority = "HIGH"
+    return priority, impact
 
 # ============================================================
 # Build items
@@ -585,6 +837,8 @@ def build_items_from_analysis(
     def add(kind: str, text: str, source: str, context_hint: str = ""):
         nonlocal seq
         gl, cf, bucket = ai_gate_item(text=text, kind=kind, context_hint=context_hint)
+        title, detail = task_rewrite_basic(kind, text)
+        pr, imp = classify_priority_impact(kind, text)
         items.append(
             ProposalItem(
                 id=f"I{seq:04d}",
@@ -593,11 +847,16 @@ def build_items_from_analysis(
                 source=source,
                 bucket=bucket,
                 gating_label=gl,
-                confidence=cf
+                confidence=cf,
+                display_title=title,
+                display_detail=detail,
+                priority=pr,
+                impact=imp
             )
         )
         seq += 1
 
+    # Rules as actionable tasks (only key lines)
     for label, lines in (rules or {}).items():
         for ln in lines:
             add("rule", f"{label}: {ln}", "Submission Rules", "Submission compliance rules")
@@ -614,12 +873,12 @@ def build_items_from_analysis(
     for req in (requirements or []):
         add("requirement", req, "RFP", "Compliance requirement")
 
-    # Missing critical company fields as tasks
-    critical, _ = missing_info_alerts(company)
-    for c in critical:
-        add("field_missing", c, "Company Profile", "Missing critical company field")
+    # Missing critical company fields become readiness tasks (not hard blocks)
+    miss = missing_critical(company)
+    for f in miss:
+        add("field_missing", f"Missing required company field: {f.replace('_',' ').title()}", "Company Profile", "Missing company field")
 
-    # De-dupe by text
+    # De-dupe
     out = []
     seen = set()
     for it in items:
@@ -636,63 +895,102 @@ def build_items_from_analysis(
 
     return out
 
-
 def get_actionable_items(items: List[ProposalItem]) -> List[ProposalItem]:
     return [i for i in (items or []) if i.gating_label == "ACTIONABLE"]
 
+# ============================================================
+# Scoring Engine (Locked rules)
+# - Export gate: Overall >= 60 AND Compliance >= 80
+# - Win ability does NOT affect overall progress
+# - No hard blocks; missing reduces score
+# ============================================================
+def compliance_score(items: List[ProposalItem]) -> int:
+    reqs = [i for i in (items or []) if i.kind == "requirement" and i.gating_label == "ACTIONABLE"]
+    if not reqs:
+        return 0
+    # Pass=1.0, Unknown=0.5, Fail=0.0
+    total = 0.0
+    for r in reqs:
+        if r.status == "Pass":
+            total += 1.0
+        elif r.status == "Unknown":
+            total += 0.5
+        else:
+            total += 0.0
+    pct = (total / max(1, len(reqs))) * 100
+    return clamp_pct(pct)
 
-def get_informational_items(items: List[ProposalItem]) -> List[ProposalItem]:
-    return [i for i in (items or []) if i.gating_label == "INFORMATIONAL"]
-
-
-def completion_stats(items: List[ProposalItem], checks: Dict[str, bool]) -> Tuple[int, int, int]:
+def tasks_score(items: List[ProposalItem], checks: Dict[str, bool]) -> int:
     act = get_actionable_items(items)
-    total = len(act)
+    if not act:
+        return 0
     done = sum(1 for i in act if checks.get(i.id, False))
-    remaining = max(0, total - done)
-    return total, done, remaining
+    return clamp_pct((done / max(1, len(act))) * 100)
 
+def drafts_score(drafts: Dict[str, str]) -> int:
+    if not drafts:
+        return 0
+    keys = ["Cover Letter", "Executive Summary", "Technical Approach", "Management Plan", "Past Performance"]
+    present = 0
+    for k in keys:
+        v = (drafts or {}).get(k, "").strip()
+        if v and safe_no_insert(v) and len(v) >= 200:
+            present += 1
+    return clamp_pct((present / max(1, len(keys))) * 100)
 
-def kpi_color(level: str) -> str:
-    return {"good": "pill-green", "warn": "pill-yellow", "bad": "pill-red"}.get(level, "pill-blue")
+def overall_progress_score(items: List[ProposalItem], checks: Dict[str, bool], company: CompanyInfo, drafts: Dict[str, str]) -> int:
+    # Overall = Tasks(60) + Company(20) + Drafts(20)
+    t = tasks_score(items, checks)
+    c = company_completeness(company)
+    d = drafts_score(drafts)
+    pct = (t * 0.60) + (c * 0.20) + (d * 0.20)
+    return clamp_pct(pct)
 
+def win_ability_score(company: CompanyInfo, drafts: Dict[str, str], rfp_text: str) -> int:
+    # Informational only
+    score = 0
+    if company.differentiators.strip(): score += 25
+    if company.capabilities.strip(): score += 20
+    if company.past_performance.strip(): score += 15
+    if drafts_score(drafts) >= 60: score += 20
+    # SOW match: simple heuristic on overlap
+    if rfp_text and company.capabilities:
+        a = set(re.findall(r"[a-z]{4,}", rfp_text.lower()[:4000]))
+        b = set(re.findall(r"[a-z]{4,}", company.capabilities.lower()))
+        overlap = len(a.intersection(b))
+        if overlap >= 30: score += 20
+        elif overlap >= 15: score += 12
+        elif overlap >= 8: score += 6
+    return clamp_pct(score)
+
+def ready_state(overall: int, compliance: int) -> str:
+    if compliance >= 80 and overall >= 60:
+        return "READY"
+    if compliance >= 70 and overall >= 50:
+        return "ALMOST"
+    return "NOT READY"
+
+def export_allowed(overall: int, compliance: int) -> bool:
+    return (overall >= 60) and (compliance >= 80)
 
 # ============================================================
-# DOCX export
+# DOCX export helpers
 # ============================================================
 def add_field(paragraph, field_code: str):
     run = paragraph.add_run()
     r = run._r
-
-    fldChar1 = OxmlElement('w:fldChar')
-    fldChar1.set(qn('w:fldCharType'), 'begin')
-
-    instrText = OxmlElement('w:instrText')
-    instrText.set(qn('xml:space'), 'preserve')
-    instrText.text = field_code
-
-    fldChar2 = OxmlElement('w:fldChar')
-    fldChar2.set(qn('w:fldCharType'), 'separate')
-
-    fldChar3 = OxmlElement('w:fldChar')
-    fldChar3.set(qn('w:fldCharType'), 'end')
-
-    r.append(fldChar1)
-    r.append(instrText)
-    r.append(fldChar2)
-    r.append(fldChar3)
-
+    fldChar1 = OxmlElement('w:fldChar'); fldChar1.set(qn('w:fldCharType'), 'begin')
+    instrText = OxmlElement('w:instrText'); instrText.set(qn('xml:space'), 'preserve'); instrText.text = field_code
+    fldChar2 = OxmlElement('w:fldChar'); fldChar2.set(qn('w:fldCharType'), 'separate')
+    fldChar3 = OxmlElement('w:fldChar'); fldChar3.set(qn('w:fldCharType'), 'end')
+    r.append(fldChar1); r.append(instrText); r.append(fldChar2); r.append(fldChar3)
 
 def add_page_numbers(doc: docx.Document):
     section = doc.sections[0]
     footer = section.footer
     p = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.add_run("Page ")
-    add_field(p, "PAGE")
-    p.add_run(" of ")
-    add_field(p, "NUMPAGES")
-
+    p.add_run("Page "); add_field(p, "PAGE"); p.add_run(" of "); add_field(p, "NUMPAGES")
 
 def add_table_of_contents(doc: docx.Document):
     doc.add_page_break()
@@ -700,7 +998,6 @@ def add_table_of_contents(doc: docx.Document):
     p = doc.add_paragraph()
     add_field(p, r'TOC \o "1-3" \z \u')
     doc.add_page_break()
-
 
 def add_title_page(doc: docx.Document, company: CompanyInfo, logo_bytes: Optional[bytes]):
     doc.add_paragraph("")
@@ -715,51 +1012,31 @@ def add_title_page(doc: docx.Document, company: CompanyInfo, logo_bytes: Optiona
         except Exception:
             pass
 
-    title = company.proposal_title.strip() or "Proposal"
-    company_name = company.legal_name.strip() or "[Company Name]"
-    sol = company.solicitation_number.strip() or "[Solicitation #]"
-    agency = company.agency_customer.strip() or "[Agency/Customer]"
-
     p1 = doc.add_paragraph(); p1.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r1 = p1.add_run(company_name); r1.bold = True
+    r1 = p1.add_run(company.legal_name); r1.bold = True
 
     p2 = doc.add_paragraph(); p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r2 = p2.add_run(title); r2.bold = True
+    r2 = p2.add_run(company.proposal_title); r2.bold = True
 
     doc.add_paragraph("")
     p3 = doc.add_paragraph(); p3.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p3.add_run(f"Solicitation: {sol}")
+    p3.add_run(f"Solicitation: {company.solicitation_number}")
 
     p4 = doc.add_paragraph(); p4.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p4.add_run(f"Agency/Customer: {agency}")
+    p4.add_run(f"Agency/Customer: {company.agency_customer}")
 
     doc.add_paragraph("")
     p5 = doc.add_paragraph(); p5.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p5.add_run(f"UEI: {company.uei or '[UEI]'}    CAGE: {company.cage or '[CAGE]'}")
+    line = f"UEI: {company.uei}"
+    if company.cage.strip():
+        line += f"    CAGE: {company.cage}"
+    p5.add_run(line)
 
     doc.add_page_break()
-
-
-def signature_block(company: CompanyInfo) -> str:
-    signer_name = (company.signer_name.strip() or company.poc_name.strip())
-    signer_title = company.signer_title.strip()
-    signer_company = (company.signer_company.strip() or company.legal_name.strip())
-    signer_phone = (company.signer_phone.strip() or company.poc_phone.strip())
-    signer_email = (company.signer_email.strip() or company.poc_email.strip())
-
-    lines = ["Respectfully,", "", "", ""]
-    if signer_name: lines.append(signer_name)
-    if signer_title: lines.append(signer_title)
-    if signer_company: lines.append(signer_company)
-    if signer_phone: lines.append(signer_phone)
-    if signer_email: lines.append(signer_email)
-    return "\n".join(lines).strip()
-
 
 def add_paragraph_lines(doc: docx.Document, text: str):
     for line in (text or "").splitlines():
         doc.add_paragraph(line)
-
 
 def build_docx_package(company: CompanyInfo, logo_bytes: Optional[bytes], diag: Dict[str, Any],
                        items: List[ProposalItem], drafts: Dict[str, str], rules: Dict[str, List[str]],
@@ -786,9 +1063,6 @@ def build_docx_package(company: CompanyInfo, logo_bytes: Optional[bytes], diag: 
             doc.add_paragraph(k, style="List Bullet")
             for ln in (lines or [])[:6]:
                 doc.add_paragraph(ln, style="List Bullet 2")
-    else:
-        doc.add_paragraph("No submission rules detected.", style="List Bullet")
-
     doc.add_page_break()
 
     doc.add_heading("Actionable Task Checklist", level=1)
@@ -797,64 +1071,42 @@ def build_docx_package(company: CompanyInfo, logo_bytes: Optional[bytes], diag: 
         for it in act:
             checked = task_checks.get(it.id, False)
             mark = "☑" if checked else "☐"
-            doc.add_paragraph(f"{mark} [{it.bucket}] {it.text}", style="List Bullet")
-    else:
-        doc.add_paragraph("No actionable tasks detected.", style="List Bullet")
+            doc.add_paragraph(f"{mark} [{it.bucket}] {it.display_title}: {it.display_detail}", style="List Bullet")
     doc.add_page_break()
 
     doc.add_heading("Draft Proposal Sections", level=1)
-
-    doc.add_heading("Cover Letter", level=2)
-    cover = f"""COVER LETTER
-
-{company.legal_name or "[Company Name]"}
-{company.address or "[Address]"}
-UEI: {company.uei or "[UEI]"} | CAGE: {company.cage or "[CAGE]"}
-POC: {company.poc_name or "[POC]"} | {company.poc_email or "[email]"} | {company.poc_phone or "[phone]"}
-
-Subject: {company.proposal_title or "Proposal Submission"}
-
-Dear Contracting Officer,
-
-{company.legal_name or "[Company Name]"} submits this proposal in response to the solicitation and will execute with a low-risk approach aligned to schedule, quality, reporting, and risk management.
-
-{signature_block(company)}
-"""
-    add_paragraph_lines(doc, cover)
-
-    for title in ["Executive Summary", "Technical Approach", "Management Plan", "Past Performance"]:
-        if title in drafts:
-            doc.add_heading(title, level=2)
-            add_paragraph_lines(doc, drafts[title])
+    for k in ["Cover Letter", "Executive Summary", "Technical Approach", "Management Plan", "Past Performance"]:
+        if k in drafts and drafts[k].strip():
+            doc.add_heading(k, level=2)
+            add_paragraph_lines(doc, drafts[k])
 
     buf = io.BytesIO()
     doc.save(buf)
     return buf.getvalue()
 
-
 def build_matrix_csv(items: List[ProposalItem]) -> str:
-    rows = ["id,kind,bucket,gating_label,confidence,status,mapped_section,text,notes"]
+    rows = ["id,kind,bucket,gating_label,confidence,status,mapped_section,display_title,display_detail,text,notes"]
     for it in items:
         if it.kind != "requirement":
             continue
         row = [
             it.id, it.kind, it.bucket, it.gating_label, str(it.confidence),
             it.status, (it.mapped_section or ""),
+            '"' + (it.display_title or "").replace('"', '""') + '"',
+            '"' + (it.display_detail or "").replace('"', '""') + '"',
             '"' + (it.text or "").replace('"', '""') + '"',
             '"' + (it.notes or "").replace('"', '""') + '"'
         ]
         rows.append(",".join(row))
     return "\n".join(rows)
 
-
 # ============================================================
-# Persistence (FIXED: uses st.session_state["items"] not .items)
+# Persistence
 # ============================================================
 def b64_from_bytes(b: Optional[bytes]) -> Optional[str]:
     if not b:
         return None
     return base64.b64encode(b).decode("utf-8")
-
 
 def bytes_from_b64(s: Optional[str]) -> Optional[bytes]:
     if not s:
@@ -863,7 +1115,6 @@ def bytes_from_b64(s: Optional[str]) -> Optional[bytes]:
         return base64.b64decode(s.encode("utf-8"))
     except Exception:
         return None
-
 
 def export_project_json() -> str:
     c: CompanyInfo = st.session_state["company"]
@@ -887,7 +1138,6 @@ def export_project_json() -> str:
     }
     return json.dumps(payload, indent=2)
 
-
 def import_project_json(s: str) -> Tuple[bool, str]:
     try:
         payload = json.loads(s)
@@ -902,7 +1152,7 @@ def import_project_json(s: str) -> Tuple[bool, str]:
         st.session_state["amendments"] = payload.get("amendments", []) or []
 
         company_dict = payload.get("company", {}) or {}
-        c = CompanyInfo(certifications=[])
+        c = CompanyInfo()
         for k, v in company_dict.items():
             if hasattr(c, k):
                 setattr(c, k, v)
@@ -911,7 +1161,6 @@ def import_project_json(s: str) -> Tuple[bool, str]:
         st.session_state["company"] = c
 
         st.session_state["logo_bytes"] = bytes_from_b64(payload.get("logo_b64"))
-
         st.session_state["items"] = [ProposalItem(**i) for i in (payload.get("items") or [])]
         st.session_state["task_checks"] = payload.get("task_checks", {}) or {}
         st.session_state["drafts"] = payload.get("drafts", {}) or {}
@@ -919,19 +1168,16 @@ def import_project_json(s: str) -> Tuple[bool, str]:
         st.session_state["ai_enabled"] = bool(payload.get("ai_enabled", False))
         st.session_state["ai_model"] = payload.get("ai_model", "gpt-4.1-mini")
         st.session_state["step"] = payload.get("step", 0)
-
         return True, "Project loaded."
     except Exception as e:
         return False, f"Could not load project: {e}"
 
-
 # ============================================================
-# Session init (BRACKET STYLE)
+# Session init
 # ============================================================
 def ss_init(key: str, value):
     if key not in st.session_state:
         st.session_state[key] = value
-
 
 ss_init("rfp_text", "")
 ss_init("rfp_diag", {})
@@ -939,7 +1185,7 @@ ss_init("rules", {})
 ss_init("forms", [])
 ss_init("attachments", [])
 ss_init("amendments", [])
-ss_init("company", CompanyInfo(certifications=[]))
+ss_init("company", CompanyInfo())
 ss_init("logo_bytes", None)
 ss_init("items", [])
 ss_init("task_checks", {})
@@ -950,140 +1196,202 @@ ss_init("ai_model", "gpt-4.1-mini")
 ss_init("step", 0)
 
 # ============================================================
-# UI Header
+# System banner + readiness console + path walker bar
 # ============================================================
-st.markdown(
-    f"""
-    <div class="brandbar">
-      <div class="brand-left">
-        <div class="brand-dot"></div>
-        <div>
-          <div class="brand-title">{APP_NAME}</div>
-          <div class="brand-sub">{BUILD_VERSION} • {BUILD_DATE}</div>
+def walker_svg(color: str) -> str:
+    # Minimal geometric human icon (rigid, not cartoon)
+    return f"""
+    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <circle cx="12" cy="5.5" r="2.5" fill="{color}"/>
+      <path d="M9.3 22V12.2c0-1.2.7-2.3 1.8-2.8l.2-.1c.9-.4 2-.4 2.9 0l.2.1c1.1.5 1.8 1.6 1.8 2.8V22"
+            stroke="{color}" stroke-width="2" stroke-linecap="round"/>
+      <path d="M8 14.5h8" stroke="{color}" stroke-width="2" stroke-linecap="round"/>
+      <path d="M11.2 22v-5.2" stroke="{color}" stroke-width="2" stroke-linecap="round"/>
+      <path d="M12.8 22v-5.2" stroke="{color}" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+    """
+
+def render_console(items: List[ProposalItem], checks: Dict[str, bool], company: CompanyInfo, drafts: Dict[str, str], rfp_text: str):
+    comp = compliance_score(items)
+    overall = overall_progress_score(items, checks, company, drafts)
+    company_pct = company_completeness(company)
+    win = win_ability_score(company, drafts, rfp_text)
+    state = ready_state(overall, comp)
+
+    comp_grade = grade_from_pct(comp)
+    comp_color, comp_chip = pct_color(comp)
+    overall_color, overall_chip = pct_color(overall)
+    company_color, company_chip = pct_color(company_pct)
+    win_color, win_chip = pct_color(win)
+
+    exp = "UNLOCKED" if export_allowed(overall, comp) else "LOCKED"
+    exp_chip = "chip-good" if exp == "UNLOCKED" else "chip-bad"
+
+    state_text = {"READY": "READY", "ALMOST": "ALMOST READY", "NOT READY": "NOT READY"}[state]
+    state_chip = "chip-good" if state == "READY" else ("chip-warn" if state == "ALMOST" else "chip-bad")
+
+    # Top system banner
+    st.markdown(
+        f"""
+        <div class="sysbar">
+          <div class="sys-left">
+            <div class="sys-dot"></div>
+            <div>
+              <div class="sys-title">PATH STATUS: ACTIVE • {BUILD_VERSION} • {BUILD_DATE}</div>
+              <div class="sys-quote">YOU ARE NOW ON THE PATH TO SUCCESS!</div>
+              <div class="sys-sub">System-guided. Compliance-first. Submission-ready.</div>
+            </div>
+          </div>
+          <div style="text-align:right;">
+            <span class="chip {state_chip}">READY STATE: {state_text}</span>
+            <span class="chip {exp_chip}">EXPORT: {exp}</span>
+          </div>
         </div>
-      </div>
-      <div class="muted">Proposal prep — guided and focused</div>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+        """,
+        unsafe_allow_html=True
+    )
+
+    # Readiness Console
+    def bar_html(label: str, pct: int, meta: str, color: str, walker: bool = False) -> str:
+        left = max(2, min(98, pct))  # keep walker visible
+        walker_block = ""
+        if walker:
+            walker_block = f"""
+              <div class="walker" style="left:{left}%;">
+                {walker_svg(color)}
+              </div>
+            """
+        return f"""
+        <div class="barrow">
+          <div class="barlabel">{label}</div>
+          <div class="barmeta">{meta}</div>
+        </div>
+        <div class="barwrap">
+          <div class="barfill" style="width:{pct}%; background:{color};"></div>
+          {walker_block}
+        </div>
+        """
+
+    st.markdown(
+        f"""
+        <div class="console">
+          <h4>Readiness Console</h4>
+          <div class="console-sub">Only unresolved items that affect readiness are shown.</div>
+          <div class="divider"></div>
+
+          {bar_html("Compliance", comp, f"{comp}% • Grade {comp_grade}", comp_color, walker=False)}
+          {bar_html("Company Profile", company_pct, f"{company_pct}%", company_color, walker=False)}
+          {bar_html("Win Strength", win, f"{win}%", win_color, walker=False)}
+
+          <div class="divider"></div>
+
+          {bar_html("Overall Progress", overall, f"{overall}%", overall_color, walker=True)}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # If blocked, show reasons (no internal jargon)
+    if not export_allowed(overall, comp):
+        reasons = []
+        if comp < 80:
+            reasons.append(f"Compliance is {comp}% (minimum 80%).")
+        if overall < 60:
+            reasons.append(f"Overall progress is {overall}% (minimum 60%).")
+        if reasons:
+            ui_notice("EXPORT LOCKED", " • ".join(reasons), tone="warn")
+
+    return comp, overall, company_pct, win, state
 
 # ============================================================
 # Sidebar
 # ============================================================
 st.sidebar.title(APP_NAME)
 
-with st.sidebar.expander("AI Settings", expanded=False):
+with st.sidebar.expander("AI", expanded=False):
     key_present = bool(get_openai_key())
-    st.session_state["ai_enabled"] = st.toggle("Enable AI (gating + drafts)", value=st.session_state["ai_enabled"], disabled=not key_present)
-    st.session_state["ai_model"] = st.selectbox("AI model", options=["gpt-4.1-mini", "gpt-4.1"], index=0)
+    st.session_state["ai_enabled"] = st.toggle("Enable AI Drafts", value=st.session_state["ai_enabled"], disabled=not key_present)
+    st.session_state["ai_model"] = st.selectbox("Model", options=["gpt-4.1-mini", "gpt-4.1"], index=0)
     if not key_present:
-        ui_notice("AI off", "Add OPENAI_API_KEY in Render → Environment to enable AI.", tone="warn")
+        ui_notice("AI OFF", "Set OPENAI_API_KEY in Render Environment to enable drafts.", tone="warn")
 
-with st.sidebar.expander("Project Save / Load", expanded=False):
+with st.sidebar.expander("Project", expanded=False):
     st.download_button(
-        "Download Project (.json)",
+        "Download Project",
         data=export_project_json(),
         file_name="path_ai_project.json",
         mime="application/json"
     )
-    up_proj = st.file_uploader("Upload Project (.json)", type=["json"], key="proj_uploader")
+    up_proj = st.file_uploader("Load Project", type=["json"], key="proj_uploader")
     if up_proj:
         ok, msg = import_project_json(up_proj.read().decode("utf-8", errors="ignore"))
-        if ok:
-            ui_notice("Loaded", "Project restored.", tone="good")
-        else:
-            ui_notice("Load failed", msg, tone="bad")
+        ui_notice("PROJECT", msg, tone=("good" if ok else "bad"))
 
-steps = ["Intake", "Company", "Compliance", "Draft", "Export"]
+steps = ["Intake", "Company", "Fix", "Draft", "Export"]
 chosen = st.sidebar.radio("Navigate", options=list(range(len(steps))), format_func=lambda i: steps[i], index=st.session_state["step"])
-
 
 def can_enter_step(target_step: int) -> Tuple[bool, str]:
     if target_step <= 0:
         return True, ""
     if target_step >= 1:
         if not st.session_state["rfp_text"].strip() or not st.session_state["analysis_done"]:
-            return False, "Complete Intake and run Analyze first."
+            return False, "Run Intake → Analyze."
     if target_step >= 2:
-        crit, _ = missing_info_alerts(st.session_state["company"])
-        if crit:
-            return False, "Complete critical Company fields first."
+        # No hard blocks; allow entry
+        return True, ""
     if target_step >= 3:
-        crit, _ = missing_info_alerts(st.session_state["company"])
-        if crit:
-            return False, "Complete critical Company fields first."
-        if not st.session_state["items"]:
-            return False, "Run Analyze in Intake first."
+        if not st.session_state.get("ai_enabled", False):
+            return False, "Enable AI drafts in sidebar."
     if target_step >= 4:
         if not (st.session_state["drafts"] or {}):
             return False, "Generate drafts first."
     return True, ""
 
-
 allowed, why = can_enter_step(chosen)
 if not allowed:
-    ui_notice("Not yet", why, tone="warn")
+    ui_notice("STATUS", why, tone="warn")
     chosen = st.session_state["step"]
 else:
     st.session_state["step"] = chosen
 
-# Top progress
-items_now = st.session_state["items"] or []
-total_tasks, done_tasks, remaining_tasks = completion_stats(items_now, st.session_state["task_checks"] or {})
-pct = int(round((done_tasks / max(1, total_tasks)) * 100)) if total_tasks else 0
-st.progress(pct / 100.0)
-
-crit, _ = missing_info_alerts(st.session_state["company"])
-gate_css = kpi_color("warn" if (not st.session_state["analysis_done"] or crit) else "good")
-gate_label = "In Progress" if (not st.session_state["analysis_done"] or crit) else "Ready"
-
-st.markdown(
-    f"""
-    <div class="card">
-      <h4>Progress</h4>
-      <div class="muted">Actionable tasks drive progress. Informational items stay tucked away in Reference.</div>
-      <div class="divider"></div>
-      <span class="pill pill-blue">Tasks: {total_tasks}</span>
-      <span class="pill pill-green">Done: {done_tasks}</span>
-      <span class="pill pill-yellow">Remaining: {remaining_tasks}</span>
-      <span class="pill {gate_css}">Gate: {gate_label}</span>
-      <span class="pill pill-red">Missing critical fields: {len(crit)}</span>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
-
 # Nav buttons
 col_nav1, col_nav2, col_nav3 = st.columns([1, 1, 6])
 with col_nav1:
-    if st.button("⬅ Back", use_container_width=True, disabled=(st.session_state["step"] == 0)):
+    if st.button("Back", use_container_width=True, disabled=(st.session_state["step"] == 0)):
         st.session_state["step"] = max(0, st.session_state["step"] - 1)
         st.rerun()
 with col_nav2:
     nxt = min(len(steps) - 1, st.session_state["step"] + 1)
     ok_next, why_next = can_enter_step(nxt)
-    if st.button("Next ➜", use_container_width=True, disabled=not ok_next):
+    if st.button("Continue", use_container_width=True, disabled=not ok_next):
         st.session_state["step"] = nxt
         st.rerun()
 with col_nav3:
     if not ok_next and st.session_state["step"] < len(steps) - 1:
-        st.caption(f"To continue: {why_next}")
+        st.caption(why_next)
 
+# Render banner + console (always)
+_ = render_console(
+    items=st.session_state["items"] or [],
+    checks=st.session_state["task_checks"] or {},
+    company=st.session_state["company"],
+    drafts=st.session_state["drafts"] or {},
+    rfp_text=st.session_state["rfp_text"] or ""
+)
 
 # ============================================================
 # Pages
 # ============================================================
 def page_intake():
-    st.subheader("Intake")
+    st.subheader("INTAKE")
 
     left, right = st.columns([1.1, 0.9], gap="large")
 
     with left:
-        uploaded = st.file_uploader("Upload RFP (PDF, DOCX, or TXT)", type=["pdf", "docx", "txt"])
-        pasted = st.text_area("Or paste text", value=st.session_state["rfp_text"], height=260)
+        uploaded = st.file_uploader("Upload RFP (PDF, DOCX, TXT)", type=["pdf", "docx", "txt"])
+        pasted = st.text_area("Or paste solicitation text", value=st.session_state["rfp_text"], height=240)
 
-        if st.button("Analyze", use_container_width=True):
+        if st.button("ANALYZE", use_container_width=True):
             text = ""
             diag = {}
 
@@ -1095,7 +1403,7 @@ def page_intake():
                 text = pasted.strip()
 
             if not text.strip():
-                ui_notice("Missing input", "Upload a readable file or paste text to continue.", tone="bad")
+                ui_notice("INPUT REQUIRED", "Upload a readable file or paste text.", tone="bad")
                 return
 
             st.session_state["rfp_text"] = text
@@ -1123,79 +1431,81 @@ def page_intake():
 
             checks = st.session_state["task_checks"] or {}
             for it in get_actionable_items(st.session_state["items"]):
-                if it.id not in checks:
-                    checks[it.id] = False
+                checks.setdefault(it.id, False)
             st.session_state["task_checks"] = checks
 
             st.session_state["analysis_done"] = True
-            ui_notice("Analysis complete", "Next: fill Company info.", tone="good")
+            ui_notice("STATUS", "Analysis complete.", tone="good")
 
     with right:
         diag = st.session_state["rfp_diag"] or {}
         if diag:
-            scanned = "Yes" if diag.get("likely_scanned") else "No"
+            scanned = "YES" if diag.get("likely_scanned") else "NO"
             st.markdown(
                 f"""
-                <div class="card">
-                  <h4>File readability</h4>
+                <div class="console">
+                  <h4>Input Signal</h4>
                   <div class="divider"></div>
-                  <div class="muted"><b>Type:</b> {diag.get('file_type','—')}</div>
-                  <div class="muted"><b>Pages:</b> {diag.get('pages_total','—')} • <b>Pages w/ text:</b> {diag.get('pages_with_text','—')}</div>
-                  <div class="muted"><b>Chars extracted:</b> {diag.get('chars_extracted','—')}</div>
-                  <div class="muted"><b>Likely scanned:</b> {scanned}</div>
+                  <div class="console-sub"><b>Type</b>: {diag.get('file_type','—')}</div>
+                  <div class="console-sub"><b>Pages</b>: {diag.get('pages_total','—')} • <b>Pages w/ text</b>: {diag.get('pages_with_text','—')}</div>
+                  <div class="console-sub"><b>Chars</b>: {diag.get('chars_extracted','—')}</div>
+                  <div class="console-sub"><b>Scanned</b>: {scanned}</div>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
             if diag.get("likely_scanned"):
-                ui_notice("Scanned PDF", "Text extraction can miss requirements. If possible, paste the solicitation text.", tone="warn")
+                ui_notice("SIGNAL WARNING", "Paste solicitation text for maximum accuracy.", tone="warn")
         else:
-            ui_notice("No file diagnostics", "Upload a file to see readability stats.", tone="neutral")
-
+            ui_notice("STATUS", "No input diagnostics yet.", tone="neutral")
 
 def page_company():
-    st.subheader("Company")
+    st.subheader("COMPANY PROFILE")
     c: CompanyInfo = st.session_state["company"]
 
-    logo = st.file_uploader("Upload logo (PNG/JPG) (optional)", type=["png", "jpg", "jpeg"])
-    if logo:
-        st.session_state["logo_bytes"] = logo.read()
-        ui_notice("Saved", "Logo will appear on the export.", tone="good")
-        st.image(st.session_state["logo_bytes"], width=180)
+    col_logo, col_fields = st.columns([0.7, 1.3], gap="large")
+    with col_logo:
+        logo = st.file_uploader("Logo (optional)", type=["png", "jpg", "jpeg"])
+        if logo:
+            st.session_state["logo_bytes"] = logo.read()
+            ui_notice("STATUS", "Logo saved.", tone="good")
+        if st.session_state["logo_bytes"]:
+            st.image(st.session_state["logo_bytes"], width=180)
 
-    colA, colB, colC = st.columns(3)
-    with colA:
-        c.proposal_title = st.text_input("Proposal/Contract Title", value=c.proposal_title)
-    with colB:
-        c.solicitation_number = st.text_input("Solicitation Number", value=c.solicitation_number)
-    with colC:
-        c.agency_customer = st.text_input("Agency/Customer", value=c.agency_customer)
+    with col_fields:
+        colA, colB, colC = st.columns(3)
+        with colA:
+            c.proposal_title = st.text_input("Proposal/Contract Title", value=c.proposal_title)
+        with colB:
+            c.solicitation_number = st.text_input("Solicitation Number", value=c.solicitation_number)
+        with colC:
+            c.agency_customer = st.text_input("Agency/Customer", value=c.agency_customer)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        c.legal_name = st.text_input("Legal Company Name", value=c.legal_name)
-        c.uei = st.text_input("UEI", value=c.uei)
-        c.cage = st.text_input("CAGE (optional)", value=c.cage)
-        c.naics = st.text_input("Primary NAICS (optional)", value=c.naics)
-    with col2:
-        c.address = st.text_area("Business Address", value=c.address, height=120)
-        c.poc_name = st.text_input("Point of Contact Name", value=c.poc_name)
-        c.poc_email = st.text_input("Point of Contact Email", value=c.poc_email)
-        c.poc_phone = st.text_input("Point of Contact Phone", value=c.poc_phone)
+        col1, col2 = st.columns(2)
+        with col1:
+            c.legal_name = st.text_input("Legal Company Name", value=c.legal_name)
+            c.uei = st.text_input("UEI", value=c.uei)
+            c.cage = st.text_input("CAGE (optional)", value=c.cage)
+            c.naics = st.text_input("Primary NAICS (optional)", value=c.naics)
+        with col2:
+            c.address = st.text_area("Business Address", value=c.address, height=120)
+            c.poc_name = st.text_input("Point of Contact Name", value=c.poc_name)
+            c.poc_email = st.text_input("Point of Contact Email", value=c.poc_email)
+            c.poc_phone = st.text_input("Point of Contact Phone (optional)", value=c.poc_phone)
 
-    c.capabilities = st.text_area("Capabilities", value=c.capabilities, height=100)
-    c.differentiators = st.text_area("Differentiators", value=c.differentiators, height=90)
-    c.past_performance = st.text_area("Past performance (optional)", value=c.past_performance, height=120)
+        c.capabilities = st.text_area("Capabilities", value=c.capabilities, height=110)
+        c.differentiators = st.text_area("Differentiators", value=c.differentiators, height=110)
+        c.past_performance = st.text_area("Past Performance (optional)", value=c.past_performance, height=130)
 
     st.session_state["company"] = c
 
-    crit, rec = missing_info_alerts(c)
-    if crit:
-        ui_notice("Missing critical fields", "Complete these before moving forward: " + " • ".join(crit), tone="warn")
+    miss = missing_critical(c)
+    if miss:
+        ui_notice("STATUS", f"Missing required fields: " + " • ".join([m.replace('_',' ').title() for m in miss]), tone="warn")
     else:
-        ui_notice("Looks good", "Critical fields are complete.", tone="good")
+        ui_notice("STATUS", "Required fields captured.", tone="good")
 
-    if st.button("Refresh tasks (company changes)", use_container_width=True):
+    if st.button("REFRESH FIX LIST", use_container_width=True):
         if st.session_state["rfp_text"].strip() and st.session_state["analysis_done"]:
             reqs = [it.text for it in (st.session_state["items"] or []) if it.kind == "requirement"]
             st.session_state["items"] = build_items_from_analysis(
@@ -1211,44 +1521,70 @@ def page_company():
             for it in get_actionable_items(st.session_state["items"]):
                 checks.setdefault(it.id, False)
             st.session_state["task_checks"] = checks
-            ui_notice("Updated", "Tasks refreshed.", tone="good")
+            ui_notice("STATUS", "Fix list refreshed.", tone="good")
 
-
-def page_compliance():
-    st.subheader("Compliance")
+def page_fix():
+    st.subheader("FIX MODE")
 
     items = st.session_state["items"] or []
     if not items:
-        ui_notice("Nothing to review yet", "Go back to Intake and run Analyze.", tone="warn")
+        ui_notice("STATUS", "Run Intake → Analyze.", tone="warn")
         return
 
     checks = st.session_state["task_checks"] or {}
+
+    # Only show items that matter to fix: actionable + unresolved
     actionable = get_actionable_items(items)
-    info = get_informational_items(items)
+    unresolved = [i for i in actionable if not checks.get(i.id, False)]
 
-    buckets_order = [
-        "Submission & Format",
-        "Required Forms",
-        "Attachments/Exhibits",
-        "Amendments",
-        "Company Profile",
-        "Compliance Requirements",
-        "Other",
-    ]
+    # Hide noise: only show tasks that affect compliance/readiness/score
+    show = [i for i in unresolved if i.impact in ["COMPLIANCE", "READINESS", "SCORE"]]
 
-    st.markdown("### Tasks")
-    if not actionable:
-        ui_notice("No tasks found", "No actionable items detected from current text.", tone="neutral")
-    else:
-        for bucket in buckets_order:
-            bucket_items = [i for i in actionable if i.bucket == bucket]
-            if not bucket_items:
-                continue
-            with st.expander(bucket, expanded=(bucket in ["Submission & Format", "Company Profile"])):
+    # Priority order
+    pr_order = {"CRITICAL": 0, "HIGH": 1, "NORMAL": 2, "OPTIONAL": 3}
+    show.sort(key=lambda x: (pr_order.get(x.priority, 9), x.bucket, x.id))
+
+    if not show:
+        ui_notice("STATUS", "No fix items remaining.", tone="good")
+        return
+
+    # Group by priority first, then bucket
+    priorities = ["CRITICAL", "HIGH", "NORMAL", "OPTIONAL"]
+    for pr in priorities:
+        grp = [i for i in show if i.priority == pr]
+        if not grp:
+            continue
+
+        with st.expander(f"{pr} ({len(grp)})", expanded=(pr in ["CRITICAL", "HIGH"])):
+            # bucket group within priority
+            buckets = unique_keep_order([g.bucket for g in grp])
+            for b in buckets:
+                bucket_items = [g for g in grp if g.bucket == b]
+                if not bucket_items:
+                    continue
+
+                st.markdown(f"**{b.upper()}**")
+
                 for it in bucket_items:
-                    checks.setdefault(it.id, False)
-                    checks[it.id] = st.checkbox(it.text, value=checks[it.id], key=f"task_{it.id}")
+                    title = it.display_title or "Action Required"
+                    detail = it.display_detail or ""
+                    impact = it.impact
 
+                    st.markdown(
+                        f"""
+                        <div class="taskcard">
+                          <p class="tasktitle">{title}</p>
+                          <div class="taskmeta">{detail}</div>
+                          <div class="taskimpact">Impact: {impact} • Priority: {it.priority}</div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+                    # Single resolve control
+                    checks[it.id] = st.checkbox("Resolved", value=checks.get(it.id, False), key=f"resolve_{it.id}")
+
+                    # Requirement controls (only when relevant)
                     if it.kind == "requirement":
                         cols = st.columns([1, 1.2, 2])
                         with cols[0]:
@@ -1260,7 +1596,7 @@ def page_compliance():
                             )
                         with cols[1]:
                             it.mapped_section = st.selectbox(
-                                "Mapped section",
+                                "Mapped Section",
                                 options=DEFAULT_SECTIONS,
                                 index=DEFAULT_SECTIONS.index(it.mapped_section) if it.mapped_section in DEFAULT_SECTIONS else 2,
                                 key=f"map_{it.id}"
@@ -1268,101 +1604,97 @@ def page_compliance():
                         with cols[2]:
                             it.notes = st.text_input("Notes (optional)", value=it.notes, key=f"notes_{it.id}")
 
+                    st.markdown("---")
+
     st.session_state["task_checks"] = checks
 
-    st.markdown("---")
-    st.markdown("### Reference (collapsed)")
-    with st.expander("Open Reference", expanded=False):
-        if not info:
-            st.write("No informational items.")
-        else:
-            q = st.text_input("Search reference", value="", placeholder="type to filter")
-            filt = (q or "").strip().lower()
-            show = info if not filt else [i for i in info if filt in i.text.lower() or filt in i.source.lower() or filt in i.bucket.lower()]
-            for i in show[:120]:
-                st.markdown(
-                    f"""
-                    <div class="card">
-                      <h4>{i.bucket}</h4>
-                      <div class="muted">{i.source} • confidence {i.confidence}</div>
-                      <div class="divider"></div>
-                      <div>{i.text}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-
-
 def page_draft():
-    st.subheader("Draft")
+    st.subheader("DRAFT SYSTEM")
 
     c: CompanyInfo = st.session_state["company"]
-    crit, _ = missing_info_alerts(c)
-    if crit:
-        ui_notice("Company info needed", "Finish critical company fields in Company step.", tone="warn")
-        return
+    miss = missing_critical(c)
+    if miss:
+        ui_notice("STATUS", "Complete required company fields to improve draft strength.", tone="warn")
 
     col1, col2 = st.columns([1, 1])
     with col1:
-        if st.button("Generate AI Drafts", use_container_width=True, disabled=not st.session_state["ai_enabled"]):
+        if st.button("GENERATE DRAFTS", use_container_width=True, disabled=not st.session_state["ai_enabled"]):
             d = ai_write_drafts(company=c, rfp_text=st.session_state["rfp_text"])
             if d:
                 st.session_state["drafts"] = d
-                ui_notice("Drafts created", "Review and adjust anything you want.", tone="good")
+                ui_notice("STATUS", "Drafts generated.", tone="good")
             else:
-                ui_notice("AI draft failed", "AI did not return valid output. Check API key or try again.", tone="bad")
+                ui_notice("STATUS", "Draft generation failed.", tone="bad")
     with col2:
-        if st.button("Clear drafts", use_container_width=True):
+        if st.button("CLEAR DRAFTS", use_container_width=True):
             st.session_state["drafts"] = {}
-            ui_notice("Cleared", "Drafts removed.", tone="neutral")
+            ui_notice("STATUS", "Drafts cleared.", tone="neutral")
 
     drafts = st.session_state["drafts"] or {}
     if not drafts:
-        ui_notice("No drafts yet", "Enable AI in sidebar and generate drafts.", tone="neutral")
+        ui_notice("STATUS", "No drafts available.", tone="neutral")
         return
 
-    for k in ["Executive Summary", "Technical Approach", "Management Plan", "Past Performance"]:
+    for k in ["Cover Letter", "Executive Summary", "Technical Approach", "Management Plan", "Past Performance"]:
         if k in drafts:
             with st.expander(k, expanded=(k == "Executive Summary")):
                 drafts[k] = st.text_area(k, value=drafts[k], height=260)
+
+    # Enforce no placeholders saved
+    for k, v in drafts.items():
+        if v and not safe_no_insert(v):
+            ui_notice("STATUS", f"{k} contains placeholder language. Remove it.", tone="warn")
     st.session_state["drafts"] = drafts
 
-
 def page_export():
-    st.subheader("Export")
+    st.subheader("EXPORT MODULE")
 
-    if not (st.session_state["drafts"] or {}):
-        ui_notice("Drafts needed", "Go to Draft and generate drafts before export.", tone="warn")
+    items = st.session_state["items"] or []
+    checks = st.session_state["task_checks"] or {}
+    c: CompanyInfo = st.session_state["company"]
+    drafts = st.session_state["drafts"] or {}
+
+    comp = compliance_score(items)
+    overall = overall_progress_score(items, checks, c, drafts)
+
+    allowed = export_allowed(overall, comp)
+
+    if not drafts:
+        ui_notice("STATUS", "Generate drafts before export.", tone="warn")
         return
 
-    c: CompanyInfo = st.session_state["company"]
+    # Export lock view (reasons already shown globally; keep action here)
+    if not allowed:
+        ui_notice("EXPORT LOCKED", "Resolve compliance and progress until thresholds are met.", tone="warn")
+        return
+
+    # Build and export
     doc_bytes = build_docx_package(
         company=c,
         logo_bytes=st.session_state["logo_bytes"],
         diag=st.session_state["rfp_diag"],
-        items=st.session_state["items"],
-        drafts=st.session_state["drafts"],
+        items=items,
+        drafts=drafts,
         rules=st.session_state["rules"],
-        task_checks=st.session_state["task_checks"] or {}
+        task_checks=checks
     )
 
     st.download_button(
-        "Download Proposal Package (.docx)",
+        "DOWNLOAD PROPOSAL PACKAGE (DOCX)",
         data=doc_bytes,
         file_name="PathAI_Proposal_Package.docx",
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         use_container_width=True
     )
 
-    csv_text = build_matrix_csv(st.session_state["items"] or [])
+    csv_text = build_matrix_csv(items)
     st.download_button(
-        "Download Compliance Matrix (.csv)",
+        "DOWNLOAD COMPLIANCE MATRIX (CSV)",
         data=csv_text.encode("utf-8"),
         file_name="PathAI_Compliance_Matrix.csv",
         mime="text/csv",
         use_container_width=True
     )
-
 
 # ============================================================
 # Render current step
@@ -1373,7 +1705,7 @@ if step == 0:
 elif step == 1:
     page_company()
 elif step == 2:
-    page_compliance()
+    page_fix()
 elif step == 3:
     page_draft()
 else:
