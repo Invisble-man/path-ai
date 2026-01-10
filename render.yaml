@@ -12,4 +12,3 @@ services:
         value: "true"
       - key: STREAMLIT_BROWSER_GATHER_USAGE_STATS
         value: "false"
-      # Add OPENAI_API_KEY in Render dashboard (not here)
