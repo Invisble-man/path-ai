@@ -14,7 +14,7 @@ def render() -> None:
     st.markdown("<div class='path-muted'>Upload an RFP/RFI PDF → Analyze → build your proposal step-by-step.</div>", unsafe_allow_html=True)
 
     st.write("")
-    badge("TurboTax-style guided flow • Export always unlocked")
+    badge("LET'S GET YOU THIS CONTRACT")
 
     st.write("")
     section_header("Upload RFP", "Step 1 of 6")
