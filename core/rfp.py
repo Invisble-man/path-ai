@@ -1,237 +1,188 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from io import BytesIO
 import re
-from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Optional
 
 import pdfplumber
-
-
-_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
-_DATE_RE = re.compile(
-    r"\b(?:"
-    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
-    r"\s+\d{1,2},\s+\d{4}"
-    r"|"
-    r"\d{1,2}/\d{1,2}/\d{2,4}"
-    r"|"
-    r"\d{4}-\d{2}-\d{2}"
-    r")\b",
-    re.IGNORECASE,
-)
-
-# Very lightweight signals (we will improve later with AI)
-_CERT_KEYWORDS = [
-    "SDVOSB",
-    "8(a)",
-    "WOSB",
-    "EDWOSB",
-    "HUBZone",
-    "HUBZONE",
-    "VOSB",
-    "Small Business",
-    "SAM.gov",
-    "CAGE",
-    "UEI",
-]
-_ELIGIBILITY_HINTS = [
-    "eligible",
-    "eligibility",
-    "must be",
-    "shall be",
-    "offeror shall",
-    "vendor shall",
-    "requirements for offerors",
-    "set-aside",
-]
-_PAST_PERF_HINTS = [
-    "past performance",
-    "references",
-    "relevant experience",
-    "experience requirement",
-    "previous contract",
-]
+from pypdf import PdfReader
 
 
 @dataclass
 class ParsedRFP:
-    text: str
-    pages: int
-    due_date: str
-    submission_email: str
-    requirements: List[str]
-    certifications_required: List[str]
-    eligibility_rules: List[str]
-    past_performance_requirements: List[str]
-    flags: List[str]
+    pages: int = 0
+    text: str = ""
+    due_date: Optional[str] = None
+    submission_email: Optional[str] = None
+    certifications_required: List[str] = field(default_factory=list)
+    eligibility_rules: List[str] = field(default_factory=list)
+    past_performance_requirements: List[str] = field(default_factory=list)
+    requirements: List[str] = field(default_factory=list)
+    flags: List[str] = field(default_factory=list)
 
 
-def extract_text_from_pdf(file_bytes: bytes) -> Tuple[str, int, List[str]]:
+EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+
+# Common formats seen in solicitations
+DUE_DATE_RE = re.compile(
+    r"(OFFER DUE DATE\s*/?\s*LOCAL\s*TIME\s*[:\-]?\s*)(?P<date>\d{1,2}/\d{1,2}/\d{2,4})\s*(?P<time>\d{1,2}:\d{2}\s*(AM|PM)?)?\s*(?P<tz>[A-Z]{2,4})?",
+    re.IGNORECASE,
+)
+
+CERT_KEYWORDS = [
+    "SDVOSB",
+    "8(a)",
+    "HUBZone",
+    "WOSB",
+    "EDWOSB",
+    "CMMC",
+    "ISO",
+    "SAM",
+    "UEI",
+    "CAGE",
+]
+
+
+def _safe_page_count(pdf_bytes: bytes) -> int:
+    try:
+        reader = PdfReader(BytesIO(pdf_bytes))
+        return len(reader.pages)
+    except Exception:
+        return 0
+
+
+def _extract_text_pdfplumber(pdf_bytes: bytes, max_pages: int) -> str:
+    out: List[str] = []
+    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+        total = len(pdf.pages)
+        limit = min(total, max_pages)
+        for i in range(limit):
+            page = pdf.pages[i]
+            txt = page.extract_text() or ""
+            txt = txt.replace("\x00", "").strip()
+            if txt:
+                out.append(txt)
+    return "\n\n".join(out).strip()
+
+
+def _find_due_date(text: str) -> Optional[str]:
+    m = DUE_DATE_RE.search(text)
+    if not m:
+        return None
+    date = (m.group("date") or "").strip()
+    time = (m.group("time") or "").strip()
+    tz = (m.group("tz") or "").strip()
+    parts = [p for p in [date, time, tz] if p]
+    return " ".join(parts) if parts else None
+
+
+def _find_emails(text: str) -> List[str]:
+    emails = EMAIL_RE.findall(text or "")
+    # De-dupe, preserve order
+    seen = set()
+    uniq = []
+    for e in emails:
+        e_norm = e.lower()
+        if e_norm not in seen:
+            seen.add(e_norm)
+            uniq.append(e)
+    return uniq
+
+
+def _detect_certifications(text: str) -> List[str]:
+    found = []
+    upper = (text or "").upper()
+    for k in CERT_KEYWORDS:
+        if k.upper() in upper:
+            found.append(k)
+    # De-dupe
+    return sorted(set(found), key=lambda x: x.lower())
+
+
+def _extract_requirement_lines(text: str, max_items: int = 80) -> List[str]:
     """
-    Extract text + page count from a PDF using pdfplumber.
-    Returns (text, pages, flags).
-    This function is designed to never crash the app: it returns safe defaults.
+    Lightweight heuristic:
+    - Grab lines containing SHALL / MUST / REQUIRED / WILL
+    - Also grab bullet-like lines
     """
-    flags: List[str] = []
-    if not file_bytes:
-        return "", 0, ["No file bytes provided."]
+    if not text:
+        return []
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    candidates: List[str] = []
+
+    trigger = re.compile(r"\b(shall|must|required|will be required|offeror shall|contractor shall)\b", re.IGNORECASE)
+    bullet = re.compile(r"^(\-|\*|•|\d+\.)\s+")
+
+    for ln in lines:
+        if len(ln) < 18:
+            continue
+        if trigger.search(ln) or bullet.match(ln):
+            # avoid garbage repeated headers/footers
+            if "page" in ln.lower() and re.search(r"\bpage\s+\d+\b", ln.lower()):
+                continue
+            candidates.append(ln)
+
+    # De-dupe while preserving order
+    seen = set()
+    uniq = []
+    for c in candidates:
+        c_norm = re.sub(r"\s+", " ", c).strip().lower()
+        if c_norm in seen:
+            continue
+        seen.add(c_norm)
+        uniq.append(re.sub(r"\s+", " ", c).strip())
+        if len(uniq) >= max_items:
+            break
+    return uniq
+
+
+def parse_rfp_from_pdf_bytes(pdf_bytes: bytes, max_pages_to_read: int = 60) -> ParsedRFP:
+    """
+    Robust PDF parser designed for Streamlit uploads (bytes in memory).
+    - Counts total pages safely
+    - Extracts text from first N pages (default 60) to avoid crashing on huge PDFs
+    """
+    parsed = ParsedRFP()
+
+    if not pdf_bytes:
+        parsed.flags.append("No PDF bytes received.")
+        return parsed
+
+    parsed.pages = _safe_page_count(pdf_bytes)
+
+    # Huge PDF protection (your TRGR file is enormous)
+    if parsed.pages >= 300:
+        parsed.flags.append(
+            f"Large PDF detected ({parsed.pages} pages). Extracting only the first {max_pages_to_read} pages to stay fast and stable."
+        )
 
     try:
-        with pdfplumber.open(file_bytes) as pdf:
-            pages = len(pdf.pages)
-            chunks: List[str] = []
-            for p in pdf.pages:
-                try:
-                    t = p.extract_text() or ""
-                    chunks.append(t)
-                except Exception:
-                    # Continue extracting other pages
-                    chunks.append("")
-            text = "\n".join(chunks).strip()
-
-        if not text:
-            flags.append("PDF extracted but text appears empty (scan/image-based PDF).")
-        return text, pages, flags
+        parsed.text = _extract_text_pdfplumber(pdf_bytes, max_pages=max_pages_to_read)
     except Exception as e:
-        return "", 0, [f"PDF extraction error: {e}"]
+        parsed.text = ""
+        parsed.flags.append(f"Text extraction failed: {type(e).__name__}")
 
+    if not parsed.text.strip():
+        parsed.flags.append("No extractable text found in sampled pages (may be scanned, protected, or extraction failed).")
+        return parsed
 
-def _find_submission_email(text: str) -> str:
-    emails = list(dict.fromkeys(_EMAIL_RE.findall(text or "")))  # de-dup preserve order
-    if not emails:
-        return ""
-    # Heuristic: prefer ones near "submit" or "proposal"
-    lowered = (text or "").lower()
-    for e in emails:
-        idx = lowered.find(e.lower())
-        window = lowered[max(0, idx - 80): idx + 80] if idx >= 0 else ""
-        if "submit" in window or "proposal" in window or "offers" in window:
-            return e
-    return emails[0]
+    parsed.due_date = _find_due_date(parsed.text)
 
+    emails = _find_emails(parsed.text)
+    parsed.submission_email = emails[0] if emails else None
 
-def _find_due_date(text: str) -> str:
-    # Heuristic: find date strings near “due”, “deadline”, “submit by”
-    dates = list(dict.fromkeys(_DATE_RE.findall(text or "")))
-    if not dates:
-        return ""
+    parsed.certifications_required = _detect_certifications(parsed.text)
 
-    lowered = (text or "").lower()
-    for d in dates:
-        idx = lowered.find(d.lower())
-        window = lowered[max(0, idx - 120): idx + 120] if idx >= 0 else ""
-        if "due" in window or "deadline" in window or "submit" in window or "closing" in window:
-            return d
-    return dates[0]
+    # Requirements seed (heuristic)
+    parsed.requirements = _extract_requirement_lines(parsed.text, max_items=100)
 
+    # Extra “rule of thumb” buckets (very lightweight)
+    upper = parsed.text.upper()
+    if "PAST PERFORMANCE" in upper:
+        parsed.past_performance_requirements.append("Past Performance is mentioned (review section for details).")
+    if "EVALUATION" in upper:
+        parsed.eligibility_rules.append("Evaluation criteria section is present (review and map to response).")
 
-def _collect_bullets(text: str) -> List[str]:
-    """
-    Pulls bullet-ish requirement lines in a simple way.
-    This will be improved later with AI requirement extraction.
-    """
-    if not text:
-        return []
-
-    lines = [ln.strip() for ln in text.splitlines()]
-    bullets: List[str] = []
-    for ln in lines:
-        if len(ln) < 8:
-            continue
-        if len(ln) > 240:
-            continue
-        if ln.startswith(("-", "•", "*")):
-            bullets.append(ln.lstrip("-•* ").strip())
-            continue
-        # e.g., "1. Provide ..." or "a) ..."
-        if re.match(r"^(\d+\.|\d+\)|[a-zA-Z]\)|[a-zA-Z]\.)\s+\S+", ln):
-            bullets.append(re.sub(r"^(\d+\.|\d+\)|[a-zA-Z]\)|[a-zA-Z]\.)\s+", "", ln).strip())
-
-    # De-dup while preserving order
-    seen = set()
-    out: List[str] = []
-    for b in bullets:
-        key = b.lower()
-        if key not in seen:
-            seen.add(key)
-            out.append(b)
-    return out[:80]  # safety cap
-
-
-def _extract_certifications(text: str) -> List[str]:
-    if not text:
-        return []
-    found = []
-    for kw in _CERT_KEYWORDS:
-        if re.search(rf"\b{re.escape(kw)}\b", text, flags=re.IGNORECASE):
-            found.append(kw.upper() if kw.lower() == "hubzone" else kw)
-    # De-dup
-    return list(dict.fromkeys(found))
-
-
-def _extract_eligibility_rules(text: str) -> List[str]:
-    if not text:
-        return []
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    rules: List[str] = []
-
-    for ln in lines:
-        low = ln.lower()
-        if any(h in low for h in _ELIGIBILITY_HINTS):
-            if 20 <= len(ln) <= 240:
-                rules.append(ln)
-
-    # de-dup and cap
-    rules = list(dict.fromkeys(rules))
-    return rules[:40]
-
-
-def _extract_past_performance(text: str) -> List[str]:
-    if not text:
-        return []
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    pp: List[str] = []
-    for ln in lines:
-        low = ln.lower()
-        if any(h in low for h in _PAST_PERF_HINTS):
-            if 20 <= len(ln) <= 240:
-                pp.append(ln)
-    pp = list(dict.fromkeys(pp))
-    return pp[:40]
-
-
-def parse_rfp_from_pdf_bytes(file_bytes: bytes) -> ParsedRFP:
-    """
-    One-stop parse: extract text/pages + key signals.
-    Safe defaults if anything goes sideways.
-    """
-    text, pages, flags = extract_text_from_pdf(file_bytes)
-
-    due = _find_due_date(text)
-    email = _find_submission_email(text)
-    requirements = _collect_bullets(text)
-
-    certs = _extract_certifications(text)
-    eligibility = _extract_eligibility_rules(text)
-    past_perf = _extract_past_performance(text)
-
-    if pages == 0:
-        flags.append("Could not determine page count.")
-    if not due:
-        flags.append("Due date not detected (you can still proceed).")
-    if not email:
-        flags.append("Submission email not detected (you can still proceed).")
-    if not requirements:
-        flags.append("Requirements list not detected yet (compatibility matrix will be limited).")
-
-    return ParsedRFP(
-        text=text,
-        pages=pages,
-        due_date=due,
-        submission_email=email,
-        requirements=requirements,
-        certifications_required=certs,
-        eligibility_rules=eligibility,
-        past_performance_requirements=past_perf,
-        flags=flags,
-    )
+    return parsed
