@@ -68,11 +68,11 @@ def render() -> None:
             logo_mime=logo_mime,
         )
         set_company(updated)
-        compute_all_scores()
+        compute_scores()
         st.success("Saved.")
 
     # Eligibility warnings (warnings only, never blocks)
-    scores = compute_all_scores()
+    scores = compute_scores()
     flags = st.session_state.get("eligibility_flags", []) or []
     if flags:
         warn_box("<br/>".join(flags))
