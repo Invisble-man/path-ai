@@ -54,3 +54,40 @@ def section_header(title: str, hint: str = "") -> None:
     with cols[1]:
         if hint:
             st.markdown(f"<div class='path-muted' style='text-align:right; padding-top:0.25rem;'>{hint}</div>", unsafe_allow_html=True)
+            import streamlit as st
+
+
+def evaluator_panel(diagnostics: dict):
+    """
+    Displays an evaluator-style diagnostics checklist with R/Y/G status.
+    """
+    if not diagnostics:
+        st.info("No diagnostics available yet.")
+        return
+
+    items = diagnostics.get("evaluator_items", [])
+    counts = diagnostics.get("counts", {})
+
+    st.markdown("### Evaluator Diagnostics")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Green", counts.get("green", 0))
+    c2.metric("Yellow", counts.get("yellow", 0))
+    c3.metric("Red", counts.get("red", 0))
+
+    st.write("")
+
+    for item in items:
+        status = item.get("status", "yellow")
+        label = item.get("label", "")
+        hint = item.get("hint", "")
+
+        if status == "green":
+            icon = "🟢"
+        elif status == "red":
+            icon = "🔴"
+        else:
+            icon = "🟡"
+
+        with st.expander(f"{icon} {label}", expanded=False):
+            st.write(hint)
