@@ -1,86 +1,76 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+import re
+from dataclasses import asdict
+from typing import Dict, List, Optional, Tuple
 
-import streamlit as st
-
-
-@dataclass
-class RFPState:
-    filename: str = ""
-    extracted: bool = False
-    pages: int = 0
-    text: str = ""
-    # extracted fields
-    due_date: str = ""
-    submission_email: str = ""
-    certifications_required: List[str] = field(default_factory=list)
-    naics: str = ""
-    # raw
-    pdf_bytes: Optional[bytes] = None
+from pypdf import PdfReader
 
 
-@dataclass
-class CompanyState:
-    name: str = ""
-    uei: str = ""
-    cage: str = ""
-    address: str = ""
-    naics: str = ""
-    certifications: List[str] = field(default_factory=list)
-    past_performance: str = ""
-    differentiators: str = ""
+CERTS = ["SDVOSB", "8(a)", "WOSB", "HUBZone", "VOSB", "SDB", "ISO", "CMMC"]
 
 
-def ensure_state() -> None:
-    st.session_state.setdefault("current_step", "home")
-    st.session_state.setdefault("completion", {})  # step -> started/complete
-    st.session_state.setdefault("rfp", RFPState())
-    st.session_state.setdefault("company", CompanyState())
-    st.session_state.setdefault("company_logo_bytes", None)
-
-    # Draft lifecycle
-    st.session_state.setdefault("draft_cover_letter", "")
-    st.session_state.setdefault("draft_body", "")
-    st.session_state.setdefault("final_cover_letter", "")
-    st.session_state.setdefault("final_body", "")
-    st.session_state.setdefault("qa_findings", "")
+def _extract_email(text: str) -> str:
+    m = re.search(r"[\w\.-]+@[\w\.-]+\.\w+", text or "")
+    return m.group(0) if m else ""
 
 
-def get_current_step() -> str:
-    return st.session_state.get("current_step", "home")
+def _extract_due_date(text: str) -> str:
+    # Loose match for dates like 01/10/2026 or January 10, 2026
+    patterns = [
+        r"\b(0?[1-9]|1[0-2])/(0?[1-9]|[12]\d|3[01])/(20\d{2})\b",
+        r"\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+20\d{2}\b",
+    ]
+    for p in patterns:
+        m = re.search(p, text or "", flags=re.IGNORECASE)
+        if m:
+            return m.group(0)
+    return ""
 
 
-def set_current_step(step: str) -> None:
-    st.session_state["current_step"] = step
-    _mark_started(step)
+def _extract_naics(text: str) -> str:
+    m = re.search(r"\bNAICS\s*[:#]?\s*(\d{6})\b", text or "", flags=re.IGNORECASE)
+    return m.group(1) if m else ""
 
 
-def _mark_started(step: str) -> None:
-    completion = st.session_state.get("completion", {})
-    if completion.get(step) is None:
-        completion[step] = "started"
-    st.session_state["completion"] = completion
+def _extract_certs(text: str) -> List[str]:
+    found = []
+    t = (text or "").upper()
+    for c in CERTS:
+        if c.upper() in t:
+            found.append(c)
+    # de-dupe preserve order
+    out = []
+    for x in found:
+        if x not in out:
+            out.append(x)
+    return out
 
 
-def mark_complete(step: str) -> None:
-    completion = st.session_state.get("completion", {})
-    completion[step] = "complete"
-    st.session_state["completion"] = completion
+def parse_rfp_from_pdf_bytes(pdf_bytes: bytes, max_pages_to_read: int = 40) -> Tuple[int, str]:
+    """
+    Returns (pages_total, extracted_text).
+    If text is empty, it may be scanned/image-based.
+    """
+    reader = PdfReader(pdf_bytes)
+    total_pages = len(reader.pages)
+
+    n = min(total_pages, max_pages_to_read)
+    parts = []
+    for i in range(n):
+        try:
+            parts.append(reader.pages[i].extract_text() or "")
+        except Exception:
+            parts.append("")
+
+    text = "\n".join(parts).strip()
+    return total_pages, text
 
 
-def get_rfp() -> RFPState:
-    return st.session_state["rfp"]
-
-
-def set_rfp(rfp: RFPState) -> None:
-    st.session_state["rfp"] = rfp
-
-
-def get_company() -> CompanyState:
-    return st.session_state["company"]
-
-
-def set_company(company: CompanyState) -> None:
-    st.session_state["company"] = company
+def extract_fields_from_text(text: str) -> Dict[str, str | List[str]]:
+    return {
+        "due_date": _extract_due_date(text),
+        "submission_email": _extract_email(text),
+        "certifications_required": _extract_certs(text),
+        "naics": _extract_naics(text),
+    }
