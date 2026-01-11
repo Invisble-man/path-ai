@@ -1,36 +1,13 @@
 from __future__ import annotations
 
-from typing import List, Dict, Any
+from typing import Dict, Any, List, Tuple
 
 import streamlit as st
 
-from core.state import compute_completion_pct, get_rfp, get_company
+from core.state import get_rfp, get_company
 
 
-def _normalize_status(s: str) -> str:
-    s = (s or "").strip().lower()
-    if s in ("met", "complete", "yes"):
-        return "met"
-    if s in ("partial", "incomplete"):
-        return "partial"
-    return "missing"
-
-
-def compute_compliance_pct(rows: List[Dict[str, Any]]) -> int:
-    if not rows:
-        return 0
-    score = 0.0
-    for row in rows:
-        status = _normalize_status(row.get("status", "missing"))
-        if status == "met":
-            score += 1.0
-        elif status == "partial":
-            score += 0.5
-    pct = int(round((score / max(1, len(rows))) * 100))
-    return max(0, min(100, pct))
-
-
-def grade_from_pct(pct: int) -> str:
+def _grade_from_pct(pct: int) -> str:
     if pct >= 90:
         return "A"
     if pct >= 80:
@@ -42,102 +19,97 @@ def grade_from_pct(pct: int) -> str:
     return "F"
 
 
-def compute_eligibility_flags(rfp: Dict[str, Any], company: Dict[str, Any]) -> List[str]:
+def _truthy(s: Any) -> bool:
+    if s is None:
+        return False
+    if isinstance(s, str):
+        return bool(s.strip())
+    return bool(s)
+
+
+def _build_checklist(rfp: Dict[str, Any], company: Dict[str, Any]) -> List[Tuple[str, bool, int, str]]:
+    """
+    Returns list of (label, passed, weight, hint)
+    Weights total 100 for easy scoring.
+    """
+    cover = st.session_state.get("draft_cover_letter", "") or ""
+    body = st.session_state.get("draft_body", "") or ""
+
+    checks: List[Tuple[str, bool, int, str]] = []
+
+    # RFP readiness (40)
+    checks.append(("RFP uploaded", _truthy(rfp.get("filename")), 10, "Upload an RFP PDF on the first step."))
+    checks.append(("Pages counted", (rfp.get("pages", 0) or 0) > 0, 8, "Ensure the PDF is readable (not corrupted)."))
+    checks.append(("Text extracted", _truthy(rfp.get("text")), 12, "If text is empty, try a different PDF version."))
+    checks.append(("Due date detected", _truthy(rfp.get("due_date")), 5, "If missing, you can still proceed; we’ll add manual entry later."))
+    checks.append(("Submission email/method detected", _truthy(rfp.get("submission_email")), 5, "If missing, you can still proceed; we’ll add manual entry later."))
+
+    # Company readiness (35)
+    checks.append(("Company name provided", _truthy(company.get("name")), 8, "Enter your company name for maximum accuracy."))
+    checks.append(("UEI or CAGE provided", _truthy(company.get("uei")) or _truthy(company.get("cage")), 10, "UEI/CAGE strengthens credibility and completeness."))
+    checks.append(("NAICS provided", _truthy(company.get("naics")), 5, "Add NAICS to align with the solicitation."))
+    checks.append(("Certifications selected", bool(company.get("certifications") or []), 6, "Select applicable certifications (SDVOSB, 8(a), etc.)."))
+    checks.append(("Differentiators provided", _truthy(company.get("differentiators")), 3, "Add 3–5 differentiators that match the RFP."))
+    checks.append(("Past performance provided", _truthy(company.get("past_performance")), 3, "Add 1–3 past performance bullets."))
+
+    # Draft readiness (25)
+    checks.append(("Cover letter generated", _truthy(cover) and len(cover.strip()) > 80, 10, "Generate a cover letter in Draft Proposal."))
+    checks.append(("Proposal body generated", _truthy(body) and len(body.strip()) > 200, 15, "Generate a proposal body in Draft Proposal."))
+
+    return checks
+
+
+def _eligibility_flags(rfp: Dict[str, Any], company: Dict[str, Any]) -> List[str]:
     flags: List[str] = []
+
     rfp_certs = rfp.get("certifications_required") or []
     company_certs = company.get("certifications") or []
 
-    if rfp_certs:
+    if rfp_certs and company_certs:
         overlap = {c.lower() for c in company_certs} & {c.lower() for c in rfp_certs}
         if not overlap:
-            flags.append("Eligibility warning: RFP mentions certifications; your profile doesn’t show a matching certification.")
-
-    if not (company.get("uei") or company.get("cage")):
-        flags.append("Company profile warning: UEI or CAGE is missing (not blocking).")
-
-    if not company.get("name"):
-        flags.append("Company profile warning: Company name is missing (not blocking).")
+            flags.append("Eligibility warning: RFP mentions certifications that don’t match your selected certifications.")
+    elif rfp_certs and not company_certs:
+        flags.append("Eligibility warning: RFP mentions certifications, but none are selected in your company profile.")
 
     return flags
 
 
-def build_diagnostics(rfp: Dict[str, Any], company: Dict[str, Any], rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    issues: List[str] = []
-    wins: List[str] = []
+def compute_scores() -> Dict[str, Any]:
+    rfp = (st.session_state.get("rfp") or {})
+    company = (st.session_state.get("company") or {})
 
-    # RFP diagnostics
-    if rfp.get("filename"):
-        wins.append("RFP uploaded.")
-    else:
-        issues.append("Upload an RFP PDF.")
+    checklist = _build_checklist(rfp, company)
 
-    if (rfp.get("text") or "").strip():
-        wins.append("RFP text extracted.")
-    else:
-        issues.append("RFP text extraction failed (scanned/protected PDF or parsing issue).")
+    earned = sum(weight for _, passed, weight, _ in checklist if passed)
+    total = sum(weight for _, _, weight, _ in checklist) or 1
+    compliance_pct = int(round((earned / total) * 100))
+    grade = _grade_from_pct(compliance_pct)
 
-    if rfp.get("due_date"):
-        wins.append("Due date detected.")
-    else:
-        issues.append("Due date not detected (you can still proceed).")
+    # Progress = how many checks passed
+    passed_count = sum(1 for _, passed, _, _ in checklist if passed)
+    progress_pct = int(round((passed_count / len(checklist)) * 100)) if checklist else 0
 
-    if rfp.get("submission_email"):
-        wins.append("Submission email detected.")
-    else:
-        issues.append("Submission email not detected (you can still proceed).")
+    # Win probability = conservative heuristic based on compliance + penalties
+    flags = _eligibility_flags(rfp, company)
+    win = 10 + int(compliance_pct * 0.7)
+    win -= min(20, 8 * len(flags))
+    win_probability_pct = max(1, min(95, win))
 
-    # Company diagnostics
-    if company.get("name"):
-        wins.append("Company name provided.")
-    else:
-        issues.append("Add company name for maximum accuracy.")
-
-    if company.get("uei") or company.get("cage"):
-        wins.append("UEI/CAGE provided.")
-    else:
-        issues.append("Add UEI or CAGE for a complete cover page (not blocking).")
-
-    # Compatibility diagnostics
-    if rows:
-        wins.append(f"Compatibility Matrix created ({len(rows)} rows).")
-        missing = sum(1 for r in rows if (r.get("status","").lower() == "missing"))
-        if missing > 0:
-            issues.append(f"{missing} requirements are still marked Missing in the Compatibility Matrix.")
-    else:
-        issues.append("Generate or add requirements to the Compatibility Matrix to increase compliance.")
-
-    return {"wins": wins, "issues": issues}
-
-
-def compute_win_probability_pct(compliance_pct: int, completion_pct: int, eligibility_flags: List[str]) -> int:
-    base = 10
-    base += int(compliance_pct * 0.55)
-    base += int(completion_pct * 0.25)
-    if eligibility_flags:
-        base -= min(20, 8 * len(eligibility_flags))
-    return max(1, min(95, base))
-
-
-def compute_all_scores() -> Dict[str, Any]:
-    rfp = st.session_state.get("rfp", {}) or {}
-    company = st.session_state.get("company", {}) or {}
-    rows = st.session_state.get("compatibility_rows", []) or []
-
-    completion_pct = compute_completion_pct()
-    compliance_pct = compute_compliance_pct(rows)
-    eligibility_flags = compute_eligibility_flags(rfp, company)
-    win_probability_pct = compute_win_probability_pct(compliance_pct, completion_pct, eligibility_flags)
-
-    grade = grade_from_pct(compliance_pct)
-    diagnostics = build_diagnostics(rfp, company, rows)
+    diagnostics = {
+        "passed": [label for label, passed, _, _ in checklist if passed],
+        "missing": [(label, hint) for label, passed, _, hint in checklist if not passed],
+        "weights": [{"label": label, "passed": passed, "weight": weight} for label, passed, weight, _ in checklist],
+    }
 
     scores = {
-        "completion_pct": completion_pct,
+        "progress_pct": progress_pct,
         "compliance_pct": compliance_pct,
-        "win_probability_pct": win_probability_pct,
         "grade": grade,
+        "win_probability_pct": win_probability_pct,
     }
+
     st.session_state.scores = scores
-    st.session_state.eligibility_flags = eligibility_flags
+    st.session_state.eligibility_flags = flags
     st.session_state.diagnostics = diagnostics
     return scores
