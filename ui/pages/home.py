@@ -4,7 +4,7 @@ import streamlit as st
 
 from core.analyze import analyze_pdf
 from core.state import RFPData, get_rfp, set_rfp, set_current_step
-from core.scoring import compute_all_scores
+from core.scoring import compute_scores
 from ui.components import section_header, warn_box
 
 
