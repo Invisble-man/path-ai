@@ -48,7 +48,7 @@ def _sidebar_nav() -> None:
             st.rerun()
 
     st.sidebar.write("---")
-    st.sidebar.caption("Export is always unlocked.")
+    st.sidebar.caption("FASTER PROPOSALS | WIN MORE CONTRACTS.")
 
 
 def main() -> None:
