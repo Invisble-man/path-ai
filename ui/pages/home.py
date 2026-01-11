@@ -2,44 +2,55 @@ from __future__ import annotations
 
 import streamlit as st
 
-from core.state import get_rfp, set_rfp, set_current_step, RFPData
-from core.rfp import parse_rfp_from_pdf_bytes
+from core.analyze import analyze_pdf
+from core.state import RFPData, get_rfp, set_rfp, set_current_step
 from core.scoring import compute_all_scores
-from ui.components import badge, warn_box, section_header
+from ui.components import section_header, warn_box
 
 
 def render() -> None:
-    # Minimal “Google-like” center layout
     st.title("Path.AI")
-    st.markdown("<div class='path-muted'>Upload an RFP/RFI PDF → Analyze → build your proposal step-by-step.</div>", unsafe_allow_html=True)
+    st.markdown(
+        "<div class='path-muted'>Upload your RFP/RFI → Analyze → proceed step-by-step.</div>",
+        unsafe_allow_html=True,
+    )
 
-    st.write("")
-    badge("LET'S GET YOU THIS CONTRACT")
-
-    st.write("")
     section_header("Upload RFP", "Step 1 of 6")
 
-    # Center the upload box
     left, center, right = st.columns([1, 2, 1])
     with center:
         uploaded = st.file_uploader(
-            "Drag & drop your PDF here",
+            "Upload RFP/RFI (PDF)",
             type=["pdf"],
             accept_multiple_files=False,
-            label_visibility="visible",
         )
 
-        rfp_state = get_rfp()
+        # Sampling control (prevents 502 on huge PDFs)
+        max_pages = st.slider(
+            "Pages to analyze (sample)",
+            min_value=5,
+            max_value=60,
+            value=25,
+            help="Large PDFs should use lower values to stay fast/stable.",
+        )
 
-        analyze = st.button("Analyze", type="primary", use_container_width=True, disabled=(uploaded is None))
+        if uploaded is not None:
+            st.session_state["rfp_file_name"] = uploaded.name
+            st.session_state["rfp_file_bytes"] = uploaded.getvalue()
 
-        if analyze and uploaded is not None:
-            with st.spinner("Extracting text and analyzing the RFP..."):
-                pdf_bytes = uploaded.getvalue()
-                parsed = parse_rfp_from_pdf_bytes(pdf_bytes)
+        analyze_disabled = "rfp_file_bytes" not in st.session_state
+        analyze = st.button("Analyze", type="primary", use_container_width=True, disabled=analyze_disabled)
 
+        if analyze and not analyze_disabled:
+            with st.spinner("Analyzing RFP..."):
+                pdf_bytes = st.session_state["rfp_file_bytes"]
+                file_name = st.session_state.get("rfp_file_name", "uploaded.pdf")
+
+                parsed, pdf_hash = analyze_pdf(pdf_bytes, max_pages_to_read=max_pages)
+
+                # Store into canonical RFP state
                 new_rfp = RFPData(
-                    filename=uploaded.name,
+                    filename=file_name,
                     pages=parsed.pages,
                     text=parsed.text,
                     extracted=True,
@@ -53,7 +64,12 @@ def render() -> None:
                 )
                 set_rfp(new_rfp)
 
-                # Initialize compatibility rows from requirements (if any)
+                # Store meta for later
+                st.session_state["rfp_pdf_hash"] = pdf_hash
+                st.session_state["rfp_sample_pages"] = max_pages
+                st.session_state["rfp_text_length"] = len(parsed.text or "")
+
+                # Seed compatibility rows from requirements
                 if parsed.requirements:
                     st.session_state.compatibility_rows = [
                         {"requirement": r, "response": "", "status": "Missing"} for r in parsed.requirements
@@ -62,15 +78,21 @@ def render() -> None:
                     st.session_state.compatibility_rows = []
 
                 compute_all_scores()
-                set_current_step("dashboard")
+
+                # If we extracted requirements, send to Requirements Builder first
+                if parsed.requirements:
+                    set_current_step("compatibility")
+                else:
+                    set_current_step("dashboard")
+
                 st.rerun()
 
-        # Show last uploaded info if exists
-        if rfp_state.filename:
+        # Status preview
+        stored = get_rfp()
+        if stored.filename:
             st.write("")
-            st.markdown(f"**Current file:** {rfp_state.filename}")
-            st.markdown(f"**Pages detected:** {rfp_state.pages}")
-
-            if rfp_state.flags:
-                st.write("")
-                warn_box(" / ".join(rfp_state.flags))
+            st.markdown(f"**Stored file:** {stored.filename}")
+            st.markdown(f"**Pages detected:** {stored.pages}")
+            st.markdown(f"**Extracted text:** {len(stored.text or '')} chars")
+            if stored.flags:
+                warn_box(" / ".join(stored.flags))
