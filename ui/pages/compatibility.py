@@ -4,7 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from core.state import get_rfp, set_current_step
-from core.scoring import compute_all_scores
+from core.scoring import compute_scores
 from ui.components import section_header, warn_box
 
 
@@ -60,7 +60,7 @@ def render() -> None:
     )
 
     st.session_state.compatibility_rows = edited.to_dict(orient="records")
-    compute_all_scores()
+    compute_scores()
 
     st.write("")
     if st.button("Continue to Export", type="primary", use_container_width=True):
