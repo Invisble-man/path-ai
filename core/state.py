@@ -1,224 +1,86 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
 
-# The required flow (but we still allow navigation with warnings)
-step_order: List[Tuple[str, str]] = [
-    ("home", "Upload RFP"),
-    ("dashboard", "Dashboard"),
-    ("company", "Company Info"),
-    ("draft", "Draft Proposal"),
-    ("compatibility", "Compatibility Matrix"),
-    ("export", "Export"),
-]
-
-
 @dataclass
-class RFPData:
+class RFPState:
     filename: str = ""
+    extracted: bool = False
     pages: int = 0
     text: str = ""
-    extracted: bool = False
-
-    # Signals extracted by heuristics (and later AI)
+    # extracted fields
     due_date: str = ""
     submission_email: str = ""
-    certifications_required: List[str] = None
-    eligibility_rules: List[str] = None
-    past_performance_requirements: List[str] = None
-    requirements: List[str] = None
-
-    # Warnings from parsing
-    flags: List[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        d = asdict(self)
-        # dataclass defaults for lists
-        d["certifications_required"] = d["certifications_required"] or []
-        d["eligibility_rules"] = d["eligibility_rules"] or []
-        d["past_performance_requirements"] = d["past_performance_requirements"] or []
-        d["requirements"] = d["requirements"] or []
-        d["flags"] = d["flags"] or []
-        return d
-
-    @staticmethod
-    def from_dict(d: Dict[str, Any]) -> "RFPData":
-        return RFPData(
-            filename=d.get("filename", ""),
-            pages=int(d.get("pages", 0) or 0),
-            text=d.get("text", "") or "",
-            extracted=bool(d.get("extracted", False)),
-            due_date=d.get("due_date", "") or "",
-            submission_email=d.get("submission_email", "") or "",
-            certifications_required=list(d.get("certifications_required", []) or []),
-            eligibility_rules=list(d.get("eligibility_rules", []) or []),
-            past_performance_requirements=list(d.get("past_performance_requirements", []) or []),
-            requirements=list(d.get("requirements", []) or []),
-            flags=list(d.get("flags", []) or []),
-        )
+    certifications_required: List[str] = field(default_factory=list)
+    naics: str = ""
+    # raw
+    pdf_bytes: Optional[bytes] = None
 
 
 @dataclass
-class CompanyProfile:
+class CompanyState:
     name: str = ""
     uei: str = ""
     cage: str = ""
     address: str = ""
     naics: str = ""
-    differentiators: str = ""
+    certifications: List[str] = field(default_factory=list)
     past_performance: str = ""
-    certifications: List[str] = None
-
-    logo_bytes: Optional[bytes] = None
-    logo_mime: str = ""
-
-    def to_dict(self) -> Dict[str, Any]:
-        d = asdict(self)
-        d["certifications"] = d["certifications"] or []
-        return d
-
-    @staticmethod
-    def from_dict(d: Dict[str, Any]) -> "CompanyProfile":
-        return CompanyProfile(
-            name=d.get("name", "") or "",
-            uei=d.get("uei", "") or "",
-            cage=d.get("cage", "") or "",
-            address=d.get("address", "") or "",
-            naics=d.get("naics", "") or "",
-            differentiators=d.get("differentiators", "") or "",
-            past_performance=d.get("past_performance", "") or "",
-            certifications=list(d.get("certifications", []) or []),
-            logo_bytes=d.get("logo_bytes", None),
-            logo_mime=d.get("logo_mime", "") or "",
-        )
+    differentiators: str = ""
 
 
-def init_app_state() -> None:
-    """Initialize Streamlit session state safely (no crashes, no missing keys)."""
-    if "current_step" not in st.session_state:
-        st.session_state.current_step = "home"
+def ensure_state() -> None:
+    st.session_state.setdefault("current_step", "home")
+    st.session_state.setdefault("completion", {})  # step -> started/complete
+    st.session_state.setdefault("rfp", RFPState())
+    st.session_state.setdefault("company", CompanyState())
+    st.session_state.setdefault("company_logo_bytes", None)
 
-    if "rfp" not in st.session_state:
-        st.session_state.rfp = RFPData().to_dict()
-
-    if "company" not in st.session_state:
-        st.session_state.company = CompanyProfile().to_dict()
-
-    if "compatibility_rows" not in st.session_state:
-        # List[Dict]: requirement, response, status
-        st.session_state.compatibility_rows = []
-
-    if "scores" not in st.session_state:
-        # Filled in later by core/scoring.py
-        st.session_state.scores = {
-            "compliance_pct": 0,
-            "completion_pct": 0,
-            "win_probability_pct": 0,
-        }
+    # Draft lifecycle
+    st.session_state.setdefault("draft_cover_letter", "")
+    st.session_state.setdefault("draft_body", "")
+    st.session_state.setdefault("final_cover_letter", "")
+    st.session_state.setdefault("final_body", "")
+    st.session_state.setdefault("qa_findings", "")
 
 
-def set_current_step(step_id: str) -> None:
-    st.session_state.current_step = step_id
+def get_current_step() -> str:
+    return st.session_state.get("current_step", "home")
 
 
-def get_rfp() -> RFPData:
-    return RFPData.from_dict(st.session_state.get("rfp", {}) or {})
+def set_current_step(step: str) -> None:
+    st.session_state["current_step"] = step
+    _mark_started(step)
 
 
-def set_rfp(rfp: RFPData) -> None:
-    st.session_state.rfp = rfp.to_dict()
+def _mark_started(step: str) -> None:
+    completion = st.session_state.get("completion", {})
+    if completion.get(step) is None:
+        completion[step] = "started"
+    st.session_state["completion"] = completion
 
 
-def get_company() -> CompanyProfile:
-    return CompanyProfile.from_dict(st.session_state.get("company", {}) or {})
+def mark_complete(step: str) -> None:
+    completion = st.session_state.get("completion", {})
+    completion[step] = "complete"
+    st.session_state["completion"] = completion
 
 
-def set_company(profile: CompanyProfile) -> None:
-    st.session_state.company = profile.to_dict()
+def get_rfp() -> RFPState:
+    return st.session_state["rfp"]
 
 
-def _is_rfp_uploaded() -> bool:
-    rfp = get_rfp()
-    return bool(rfp.extracted and rfp.text.strip())
+def set_rfp(rfp: RFPState) -> None:
+    st.session_state["rfp"] = rfp
 
 
-def _is_company_started() -> bool:
-    c = get_company()
-    return bool(c.name.strip() or c.uei.strip() or c.cage.strip())
+def get_company() -> CompanyState:
+    return st.session_state["company"]
 
 
-def _is_company_complete_minimum() -> bool:
-    c = get_company()
-    # "Minimum viable" to draft without blocking. Draft page will still warn if incomplete.
-    return bool(c.name.strip() and (c.uei.strip() or c.cage.strip()))
-
-
-def _has_compatibility() -> bool:
-    rows = st.session_state.get("compatibility_rows", []) or []
-    return len(rows) > 0
-
-
-def get_step_status_map() -> Dict[str, str]:
-    """
-    done / in_progress / not_started
-    Sidebar should be a guide, not a gate.
-    """
-    status = {sid: "not_started" for sid, _ in step_order}
-
-    # Home (Upload RFP)
-    if _is_rfp_uploaded():
-        status["home"] = "done"
-    else:
-        status["home"] = "in_progress" if get_rfp().filename else "not_started"
-
-    # Dashboard becomes meaningful after upload
-    status["dashboard"] = "done" if _is_rfp_uploaded() else "not_started"
-
-    # Company info
-    if _is_company_complete_minimum():
-        status["company"] = "done"
-    elif _is_company_started():
-        status["company"] = "in_progress"
-    else:
-        status["company"] = "not_started"
-
-    # Draft
-    # We'll mark in_progress if either upload or company exists, done later after we generate draft state (future)
-    if _is_rfp_uploaded() and _is_company_started():
-        status["draft"] = "in_progress"
-    else:
-        status["draft"] = "not_started"
-
-    # Compatibility
-    if _has_compatibility():
-        status["compatibility"] = "in_progress"
-    else:
-        status["compatibility"] = "not_started"
-
-    # Export is always accessible
-    status["export"] = "not_started"
-
-    return status
-
-
-def compute_completion_pct() -> int:
-    """
-    Basic completion heuristic (0-100). We’ll refine later when scoring is fully implemented.
-    """
-    points = 0
-    total = 4
-
-    if _is_rfp_uploaded():
-        points += 1
-    if _is_company_complete_minimum():
-        points += 1
-    if _has_compatibility():
-        points += 1
-    # draft generation state will be added later; for now treat as 0
-    # points += 1 when draft exists
-
-    return int(round((points / total) * 100))
+def set_company(company: CompanyState) -> None:
+    st.session_state["company"] = company
