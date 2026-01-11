@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import re
-from dataclasses import asdict
-from typing import Dict, List, Optional, Tuple
+from io import BytesIO
+from typing import Dict, List, Tuple
 
 from pypdf import PdfReader
 
@@ -16,7 +16,6 @@ def _extract_email(text: str) -> str:
 
 
 def _extract_due_date(text: str) -> str:
-    # Loose match for dates like 01/10/2026 or January 10, 2026
     patterns = [
         r"\b(0?[1-9]|1[0-2])/(0?[1-9]|[12]\d|3[01])/(20\d{2})\b",
         r"\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},\s+20\d{2}\b",
@@ -34,13 +33,12 @@ def _extract_naics(text: str) -> str:
 
 
 def _extract_certs(text: str) -> List[str]:
-    found = []
+    found: List[str] = []
     t = (text or "").upper()
     for c in CERTS:
         if c.upper() in t:
             found.append(c)
-    # de-dupe preserve order
-    out = []
+    out: List[str] = []
     for x in found:
         if x not in out:
             out.append(x)
@@ -49,14 +47,15 @@ def _extract_certs(text: str) -> List[str]:
 
 def parse_rfp_from_pdf_bytes(pdf_bytes: bytes, max_pages_to_read: int = 40) -> Tuple[int, str]:
     """
-    Returns (pages_total, extracted_text).
-    If text is empty, it may be scanned/image-based.
+    Returns (total_pages, extracted_text).
+    IMPORTANT: PdfReader expects a file-like object, so we wrap bytes in BytesIO.
     """
-    reader = PdfReader(pdf_bytes)
+    stream = BytesIO(pdf_bytes)
+    reader = PdfReader(stream)
     total_pages = len(reader.pages)
 
     n = min(total_pages, max_pages_to_read)
-    parts = []
+    parts: List[str] = []
     for i in range(n):
         try:
             parts.append(reader.pages[i].extract_text() or "")
