@@ -4,7 +4,7 @@ import streamlit as st
 
 from core.state import get_rfp, get_company, set_current_step
 from core.ai import generate_proposal_draft, has_openai_key
-from core.scoring import compute_all_scores
+from core.scoring import compute_scores
 from ui.components import section_header, warn_box, badge
 
 
@@ -45,7 +45,7 @@ def render() -> None:
             result = generate_proposal_draft(rfp.text, company.to_dict())
             st.session_state.draft_cover_letter = result["cover_letter"]
             st.session_state.draft_body = result["proposal_body"]
-            compute_all_scores()
+            compute_scores()
             st.success("Draft generated.")
 
     cover = st.session_state.get("draft_cover_letter", "")
