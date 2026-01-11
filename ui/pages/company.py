@@ -3,7 +3,7 @@ from __future__ import annotations
 import streamlit as st
 
 from core.state import get_company, set_company, CompanyProfile, get_rfp, set_current_step
-from core.scoring import compute_all_scores
+from core.scoring import compute_scores
 from ui.components import section_header, warn_box, ok_box
 
 
