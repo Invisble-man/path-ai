@@ -90,7 +90,7 @@ def _sidebar_nav() -> None:
 
     st.sidebar.markdown("---")
     st.sidebar.markdown(
-        "<span class='path-badge'>Export is always unlocked</span>",
+        "<span class='path-badge'>FASTER PROPOSALS! MORE CONTRACTS!</span>",
         unsafe_allow_html=True,
     )
 
