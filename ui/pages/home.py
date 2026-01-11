@@ -77,7 +77,7 @@ def render() -> None:
                 else:
                     st.session_state.compatibility_rows = []
 
-                compute_all_scores()
+                compute_scores()
 
                 # If we extracted requirements, send to Requirements Builder first
                 if parsed.requirements:
